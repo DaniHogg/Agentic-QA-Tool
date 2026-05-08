@@ -120,6 +120,16 @@ reports/
 └── report_jsonplaceholder_typicode_com_20260508_120000.md
 ```
 
+### 5. Clean generated artifacts
+
+```bash
+# Preview what would be removed (older than 7 days)
+agentic-qa clean
+
+# Remove all generated tests/reports now
+agentic-qa clean --all --apply
+```
+
 ---
 
 ## Options

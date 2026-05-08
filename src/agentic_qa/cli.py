@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Callable, Optional
+from datetime import datetime, timezone, timedelta
 
 import typer
 from dotenv import load_dotenv
@@ -523,6 +524,90 @@ def _md_to_html(md: str) -> str:
         out.append("</code></pre>")
 
     return "\n".join(out)
+
+
+def _artifact_candidates(reports_dir: Path) -> list[Path]:
+    """Return generated artifact files eligible for cleanup."""
+    patterns = [
+        "generated_tests_*.py",
+        "report_*.md",
+        "report_*.html",
+        "report_*.json",
+    ]
+    files: list[Path] = []
+    for pattern in patterns:
+        files.extend(reports_dir.glob(pattern))
+    return sorted(set(files))
+
+
+@app.command("clean")
+def clean(
+    reports_dir: str = typer.Option(
+        "./reports",
+        "--reports-dir", "-o",
+        help="Directory containing generated tests/reports.",
+        envvar="REPORTS_DIR",
+    ),
+    days: int = typer.Option(
+        7,
+        "--days", "-d",
+        min=0,
+        help="Delete artifacts older than this many days.",
+    ),
+    all_files: bool = typer.Option(
+        False,
+        "--all",
+        help="Delete all generated artifacts regardless of age.",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Actually delete files. Without this flag, performs a dry run.",
+    ),
+) -> None:
+    """Clean generated test scripts and report artifacts."""
+
+    root = Path(reports_dir)
+    if not root.exists():
+        console.print(f"[yellow]Reports directory not found:[/yellow] {root}")
+        raise typer.Exit(code=0)
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=days)
+    candidates = _artifact_candidates(root)
+
+    to_remove: list[Path] = []
+    for path in candidates:
+        if all_files:
+            to_remove.append(path)
+            continue
+
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        if mtime < cutoff:
+            to_remove.append(path)
+
+    if not to_remove:
+        console.print("[green]No generated artifacts matched cleanup criteria.[/green]")
+        raise typer.Exit(code=0)
+
+    mode = "APPLY" if apply else "DRY RUN"
+    console.print(Rule(f"[bold]Artifact Cleanup ({mode})[/bold]"))
+    for path in to_remove:
+        console.print(f"  - {path}")
+
+    if not apply:
+        console.print("\n[yellow]Dry run only.[/yellow] Re-run with [bold]--apply[/bold] to delete.")
+        raise typer.Exit(code=0)
+
+    deleted = 0
+    for path in to_remove:
+        try:
+            path.unlink(missing_ok=True)
+            deleted += 1
+        except OSError as exc:
+            console.print(f"[red]Failed to delete[/red] {path}: {exc}")
+
+    console.print(f"\n[green]Deleted {deleted} generated artifact(s).[/green]")
 
 
 def _active_model_name(provider: str) -> str:
