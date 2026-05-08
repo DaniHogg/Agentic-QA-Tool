@@ -29,14 +29,14 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run unit tests
-        run: pytest tests/ -v --tb=short --no-header
+        run: pytest tests/ -v --tb=short --no-header --junitxml=pytest-results.xml
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pytest-results-${{ matrix.python-version }}
-          path: .pytest_cache/
+          path: pytest-results.xml
           retention-days: 7
 
   lint:
@@ -78,14 +78,13 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run agentic-qa against public API
+        continue-on-error: true
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           agentic-qa run https://jsonplaceholder.typicode.com \
             --max-tests 5 \
             --reports-dir ./ci-reports
-        # Don't fail the build if tests the agent generates fail — just capture output
-        continue-on-error: true
 
       - name: Upload QA report
         if: always()
@@ -93,4 +92,5 @@ jobs:
         with:
           name: qa-report
           path: ci-reports/
+          if-no-files-found: warn
           retention-days: 30
