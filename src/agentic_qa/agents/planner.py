@@ -1,0 +1,111 @@
+"""Planner agent — inspects the target and produces a structured test plan."""
+
+from __future__ import annotations
+
+import os
+import httpx
+import yaml
+import json
+from pathlib import Path
+
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
+
+from agentic_qa.state import QAState
+
+
+_SYSTEM_PROMPT = """You are the QA Test Planner in an autonomous multi-agent testing system.
+
+Given information about a target (API, website, or codebase), produce a concise, structured
+test plan in Markdown. The plan must include:
+
+1. **Summary** — what the target is and what you intend to test
+2. **Test Cases** — a numbered list, each with:
+   - ID (TC-001, TC-002, ...)
+   - Name (short descriptive title)
+   - Type (positive / negative / edge-case / performance)
+   - What to test
+   - Expected outcome
+3. **Risks & Assumptions** — any known gaps or assumptions
+
+Aim for {max_tests} test cases. Be specific and actionable — the Writer agent will turn
+this plan directly into runnable pytest code.
+"""
+
+
+def _fetch_api_context(target: str) -> str:
+    """Return a summary of API endpoints from a URL or local spec file."""
+    if target.startswith("http"):
+        # Try common OpenAPI spec paths
+        for suffix in ("", "/openapi.json", "/openapi.yaml", "/swagger.json", "/docs/openapi.json"):
+            try:
+                r = httpx.get(target.rstrip("/") + suffix, timeout=10, follow_redirects=True)
+                if r.status_code == 200:
+                    ct = r.headers.get("content-type", "")
+                    if "json" in ct or "yaml" in ct or suffix.endswith((".json", ".yaml")):
+                        return f"OpenAPI spec fetched from {target + suffix}:\n\n{r.text[:4000]}"
+            except httpx.RequestError:
+                continue
+        # Fallback: treat as a plain base URL
+        return f"REST API base URL: {target}\nNo spec found — infer endpoints from common REST conventions."
+    else:
+        path = Path(target)
+        if path.exists():
+            content = path.read_text(encoding="utf-8")[:4000]
+            return f"Local spec file ({path.name}):\n\n{content}"
+        return f"Target path not found: {target}"
+
+
+def _fetch_web_context(target: str) -> str:
+    """Return basic page context from a URL."""
+    try:
+        r = httpx.get(target, timeout=10, follow_redirects=True)
+        # Trim HTML — just send the first 3000 chars
+        return f"Web page at {target} (HTTP {r.status_code}):\n\n{r.text[:3000]}"
+    except httpx.RequestError as exc:
+        return f"Could not fetch {target}: {exc}"
+
+
+def _fetch_code_context(target: str) -> str:
+    """Return a summary of Python source from a file or directory."""
+    path = Path(target)
+    if not path.exists():
+        return f"Path not found: {target}"
+    if path.is_file():
+        return f"Python file ({path.name}):\n\n{path.read_text(encoding='utf-8')[:4000]}"
+    # Directory — collect first 3 .py files
+    py_files = list(path.rglob("*.py"))[:3]
+    parts = []
+    for f in py_files:
+        parts.append(f"### {f.relative_to(path)}\n{f.read_text(encoding='utf-8')[:1200]}")
+    return f"Python codebase at {path}:\n\n" + "\n\n".join(parts)
+
+
+def plan(state: QAState) -> dict:
+    """Inspect the target and produce a structured test plan."""
+
+    model = os.getenv("OPENAI_MODEL", "gpt-4o")
+    max_tests = int(os.getenv("MAX_TEST_CASES", "10"))
+    llm = ChatOpenAI(model=model, temperature=0.2)
+
+    # Gather raw context based on target type
+    tt = state.target_type or "api"
+    if tt == "api":
+        context = _fetch_api_context(state.target)
+    elif tt == "web":
+        context = _fetch_web_context(state.target)
+    else:
+        context = _fetch_code_context(state.target)
+
+    system = _SYSTEM_PROMPT.format(max_tests=max_tests)
+    messages = [
+        SystemMessage(content=system),
+        HumanMessage(content=f"Target type: {tt}\n\nTarget context:\n{context}"),
+    ]
+
+    response = llm.invoke(messages)
+
+    return {
+        "test_plan": response.content,
+        "messages": state.messages + messages + [response],
+    }
