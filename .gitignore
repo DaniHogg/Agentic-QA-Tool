@@ -11,5 +11,7 @@ build/
 reports/*.md
 reports/*.json
 reports/generated_tests_*.py
+reports/*.html
+.vscode/
 .venv/
 venv/
