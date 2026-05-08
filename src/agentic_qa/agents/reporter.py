@@ -6,10 +6,10 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from agentic_qa.state import QAState
+from agentic_qa.llm import get_chat_model
 
 
 _SYSTEM_PROMPT = """You are the QA Reporter in an autonomous multi-agent testing system.
@@ -45,8 +45,7 @@ Keep language professional but concise. Use emoji sparingly (✅ ❌ ⚠️ only
 def report(state: QAState) -> dict:
     """Generate a Markdown QA report from execution results."""
 
-    model = os.getenv("OPENAI_MODEL", "gpt-4o")
-    llm = ChatOpenAI(model=model, temperature=0.3)
+    llm = get_chat_model(temperature=0.3)
 
     context = f"""
 Target: {state.target}

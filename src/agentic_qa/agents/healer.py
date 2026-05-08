@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from agentic_qa.state import QAState
 from agentic_qa.agents.writer import _strip_markdown_fences
+from agentic_qa.llm import get_chat_model
 
 
 _SYSTEM_PROMPT = """You are the QA Self-Healer in an autonomous multi-agent testing system.
@@ -37,8 +36,7 @@ def heal(state: QAState) -> dict:
         # Nothing to heal
         return {}
 
-    model = os.getenv("OPENAI_MODEL", "gpt-4o")
-    llm = ChatOpenAI(model=model, temperature=0.1)
+    llm = get_chat_model(temperature=0.1)
 
     messages = [
         SystemMessage(content=_SYSTEM_PROMPT),

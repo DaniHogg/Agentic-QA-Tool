@@ -20,6 +20,14 @@ class QAState(BaseModel):
         default=None,
         description="Classified by the Orchestrator: 'api', 'web', or 'code'.",
     )
+    test_strategy: str = Field(
+        default="smoke",
+        description="User-selected strategy for planning scope: smoke, sanity, regression, or custom.",
+    )
+    planning_notes: Optional[str] = Field(
+        default=None,
+        description="Optional user notes to influence generated test cases.",
+    )
 
     # ── Planner output ────────────────────────────────────────────────────────
     test_plan: Optional[str] = Field(

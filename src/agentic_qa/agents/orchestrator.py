@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import os
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from agentic_qa.state import QAState, TargetType
+from agentic_qa.llm import get_chat_model
 
 
 _SYSTEM_PROMPT = """You are the Orchestrator of an autonomous QA system.
@@ -29,8 +28,7 @@ Respond with ONLY the single word: api, web, or code. No explanation.
 def orchestrate(state: QAState) -> dict:
     """Classify the target and update state with target_type."""
 
-    model = os.getenv("OPENAI_MODEL", "gpt-4o")
-    llm = ChatOpenAI(model=model, temperature=0)
+    llm = get_chat_model(temperature=0)
 
     messages = [
         SystemMessage(content=_SYSTEM_PROMPT),

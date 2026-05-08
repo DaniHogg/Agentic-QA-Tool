@@ -7,10 +7,10 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from agentic_qa.state import QAState
+from agentic_qa.llm import get_chat_model
 
 
 _SYSTEM_PROMPT = """You are the QA Test Writer in an autonomous multi-agent testing system.
@@ -32,19 +32,20 @@ Rules you MUST follow:
 
 Target: {target}
 Target type: {target_type}
+Requested strategy: {test_strategy}
 """
 
 
 def write(state: QAState) -> dict:
     """Generate pytest test code from the test plan."""
 
-    model = os.getenv("OPENAI_MODEL", "gpt-4o")
-    llm = ChatOpenAI(model=model, temperature=0.1)
+    llm = get_chat_model(temperature=0.1)
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
     system = _SYSTEM_PROMPT.format(
         target=state.target,
         target_type=state.target_type,
+        test_strategy=state.test_strategy,
         timestamp=timestamp,
     )
 

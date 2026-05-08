@@ -5,12 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentic-qa"
 version = "0.1.0"
-description = "Multi-agent QA system powered by LangGraph + GPT-4o that autonomously plans, writes, runs, and reports tests for APIs, UIs, and Python codebases."
+description = "Multi-agent QA system powered by LangGraph + configurable LLM providers that autonomously plans, writes, runs, and reports tests for APIs, UIs, and Python codebases."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "langchain>=0.3",
     "langchain-openai>=0.2",
+    "langchain-anthropic>=0.2",
     "langgraph>=0.2",
     "httpx>=0.27",
     "playwright>=1.44",

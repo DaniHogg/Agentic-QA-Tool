@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import os
 import httpx
-import yaml
-import json
 from pathlib import Path
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from agentic_qa.state import QAState
+from agentic_qa.llm import get_chat_model
 
 
 _SYSTEM_PROMPT = """You are the QA Test Planner in an autonomous multi-agent testing system.
@@ -30,6 +28,12 @@ test plan in Markdown. The plan must include:
 
 Aim for {max_tests} test cases. Be specific and actionable — the Writer agent will turn
 this plan directly into runnable pytest code.
+
+You must adapt the plan to the requested strategy:
+- smoke: critical path only, high-signal checks, minimal set
+- sanity: basic feature health and key integrations
+- regression: broad and deep coverage across happy, negative, and edge paths
+- custom: prioritise user-provided notes exactly
 """
 
 
@@ -84,9 +88,8 @@ def _fetch_code_context(target: str) -> str:
 def plan(state: QAState) -> dict:
     """Inspect the target and produce a structured test plan."""
 
-    model = os.getenv("OPENAI_MODEL", "gpt-4o")
     max_tests = int(os.getenv("MAX_TEST_CASES", "10"))
-    llm = ChatOpenAI(model=model, temperature=0.2)
+    llm = get_chat_model(temperature=0.2)
 
     # Gather raw context based on target type
     tt = state.target_type or "api"
@@ -100,7 +103,14 @@ def plan(state: QAState) -> dict:
     system = _SYSTEM_PROMPT.format(max_tests=max_tests)
     messages = [
         SystemMessage(content=system),
-        HumanMessage(content=f"Target type: {tt}\n\nTarget context:\n{context}"),
+        HumanMessage(
+            content=(
+                f"Target type: {tt}\n"
+                f"Requested strategy: {state.test_strategy}\n"
+                f"User planning notes: {state.planning_notes or 'None'}\n\n"
+                f"Target context:\n{context}"
+            )
+        ),
     ]
 
     response = llm.invoke(messages)

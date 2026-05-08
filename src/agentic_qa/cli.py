@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import typer
 from dotenv import load_dotenv
@@ -15,7 +15,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.rule import Rule
 from rich.text import Text
 
-load_dotenv()
+load_dotenv(override=True)
 
 app = typer.Typer(
     name="agentic-qa",
@@ -26,23 +26,186 @@ app = typer.Typer(
 console = Console()
 
 
-@app.command()
+def _interactive_setup(
+    *,
+    target: Optional[str],
+    strategy: str,
+    max_tests: int,
+    self_heal: bool,
+    planning_notes: str,
+    format: str,
+) -> tuple[str, str, int, bool, str, str]:
+    """Prompt user for run configuration before starting pipeline."""
+
+    console.print(Rule("[bold]Run Setup[/bold]"))
+
+    resolved_target = target or typer.prompt("Target URL/path")
+
+    strategy_options = "smoke/sanity/regression/custom"
+    chosen_strategy = typer.prompt(
+        f"Test strategy ({strategy_options})",
+        default=(strategy or "smoke").lower(),
+    ).strip().lower()
+
+    suggested = {"smoke": 5, "sanity": 8, "regression": 20, "custom": max_tests}
+    chosen_max = typer.prompt(
+        "Max test cases",
+        default=suggested.get(chosen_strategy, max_tests),
+        type=int,
+    )
+
+    notes = planning_notes.strip()
+    if not notes:
+        notes = typer.prompt(
+            "Planner notes (optional)",
+            default="",
+            show_default=False,
+        ).strip()
+
+    chosen_self_heal = typer.confirm("Enable self-heal retry on failures?", default=self_heal)
+    chosen_format = typer.prompt("Report format (markdown/html)", default=format).strip().lower()
+
+    return (
+        resolved_target,
+        chosen_strategy,
+        chosen_max,
+        chosen_self_heal,
+        notes,
+        chosen_format,
+    )
+
+
+def _apply_node(state, fn: Callable, label: str):
+    """Execute one agent node and merge its output into QAState."""
+    from agentic_qa.state import QAState
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        progress.add_task(f"[cyan]{label}...", total=None)
+        updates = fn(state)
+
+    merged = state.model_dump()
+    if updates:
+        merged.update(updates)
+    return QAState(**merged)
+
+
+def _plan_approval_loop(state):
+    """Show plan, collect approval, and apply requested edits before execution."""
+    from agentic_qa.state import QAState
+
+    if not state.test_plan:
+        return state
+
+    while True:
+        choice = typer.prompt(
+            "Plan action: approve (a), request changes (r), add cases (n), cancel (c)",
+            default="a",
+        ).strip().lower()
+
+        if choice in ("a", "approve"):
+            console.print("[green]Plan approved. Continuing to test generation.[/green]")
+            return state
+
+        if choice in ("c", "cancel"):
+            console.print("[yellow]Run cancelled before execution.[/yellow]")
+            raise typer.Exit(code=0)
+
+        if choice in ("r", "request", "request changes"):
+            request = typer.prompt("Describe the changes you want")
+            revised = _revise_test_plan(
+                current_plan=state.test_plan,
+                request=request,
+                mode="edit",
+                strategy=state.test_strategy,
+            )
+            state = QAState(**{**state.model_dump(), "test_plan": revised})
+            console.print(Rule("[bold]Revised Test Plan[/bold]"))
+            console.print(Markdown(revised))
+            continue
+
+        if choice in ("n", "add", "add cases"):
+            request = typer.prompt("List additional test cases or coverage requests")
+            revised = _revise_test_plan(
+                current_plan=state.test_plan,
+                request=request,
+                mode="add",
+                strategy=state.test_strategy,
+            )
+            state = QAState(**{**state.model_dump(), "test_plan": revised})
+            console.print(Rule("[bold]Updated Test Plan[/bold]"))
+            console.print(Markdown(revised))
+            continue
+
+        console.print("[yellow]Invalid choice. Enter a, r, n, or c.[/yellow]")
+
+
+def _revise_test_plan(*, current_plan: str, request: str, mode: str, strategy: str) -> str:
+    """Use the configured LLM to revise the plan per user feedback."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    from agentic_qa.llm import get_chat_model
+
+    llm = get_chat_model(temperature=0.2)
+
+    system = (
+        "You are a QA Planner revising an existing Markdown test plan. "
+        "Return only the full revised Markdown plan. Keep existing test case IDs where possible. "
+        "Ensure the result remains actionable for pytest test generation."
+    )
+    mode_text = "Add new test cases and keep the existing structure" if mode == "add" else "Apply edits to existing test cases"
+    user = (
+        f"Strategy: {strategy}\n"
+        f"Revision mode: {mode_text}\n"
+        f"User request: {request}\n\n"
+        f"Current plan:\n{current_plan}"
+    )
+
+    response = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
+    return response.content.strip()
+
+
+@app.command("run")
 def run(
-    target: str = typer.Argument(
-        ...,
+    target: Optional[str] = typer.Argument(
+        None,
         help="URL (API or web) or local file/directory path to test.",
+    ),
+    provider: str = typer.Option(
+        None,
+        "--provider", "-p",
+        help="LLM provider: 'openai' or 'anthropic'.",
+        envvar="LLM_PROVIDER",
     ),
     model: str = typer.Option(
         None,
         "--model", "-m",
-        help="OpenAI model to use (default: gpt-4o).",
-        envvar="OPENAI_MODEL",
+        help="Model name for the chosen provider.",
     ),
     max_tests: int = typer.Option(
         10,
         "--max-tests", "-n",
         help="Target number of test cases for the Planner to generate.",
         envvar="MAX_TEST_CASES",
+    ),
+    strategy: str = typer.Option(
+        "smoke",
+        "--strategy", "-s",
+        help="Test strategy: smoke, sanity, regression, or custom.",
+    ),
+    planning_notes: str = typer.Option(
+        "",
+        "--planning-notes",
+        help="Extra guidance for the Planner (scope, risks, must-have cases).",
+    ),
+    interactive: bool = typer.Option(
+        True,
+        "--interactive/--no-interactive",
+        help="Use interactive setup and plan approval before execution.",
     ),
     reports_dir: str = typer.Option(
         "./reports",
@@ -73,23 +236,54 @@ def run(
 ) -> None:
     """Run the full Agentic QA pipeline against TARGET."""
 
-    _validate_env()
+    if interactive:
+        target, strategy, max_tests, self_heal, planning_notes, format = _interactive_setup(
+            target=target,
+            strategy=strategy,
+            max_tests=max_tests,
+            self_heal=self_heal,
+            planning_notes=planning_notes,
+            format=format,
+        )
+
+    if not target:
+        console.print("[red]Error:[/red] TARGET is required. Pass it or use --interactive.")
+        raise typer.Exit(code=1)
+
+    strategy = strategy.strip().lower()
+    if strategy not in ("smoke", "sanity", "regression", "custom"):
+        console.print("[red]Error:[/red] --strategy must be smoke, sanity, regression, or custom.")
+        raise typer.Exit(code=1)
+
+    active_provider = (provider or os.getenv("LLM_PROVIDER", "openai")).strip().lower()
+    _validate_env(active_provider)
 
     if format not in ("markdown", "html"):
         console.print("[red]Error:[/red] --format must be 'markdown' or 'html'.")
         raise typer.Exit(code=1)
+    if active_provider not in ("openai", "anthropic"):
+        console.print("[red]Error:[/red] --provider must be 'openai' or 'anthropic'.")
+        raise typer.Exit(code=1)
 
     # Override env vars from CLI flags
+    os.environ["LLM_PROVIDER"] = active_provider
     if model:
-        os.environ["OPENAI_MODEL"] = model
+        if active_provider == "anthropic":
+            os.environ["ANTHROPIC_MODEL"] = model
+        else:
+            os.environ["OPENAI_MODEL"] = model
+    os.environ["TEST_STRATEGY"] = strategy
     os.environ["MAX_TEST_CASES"] = str(max_tests)
     os.environ["REPORTS_DIR"] = reports_dir
 
-    # Import here so env vars are set before LangChain initialises
-    from agentic_qa.graph import get_graph
+    # Import here so env vars are set before agent initialisation
     from agentic_qa.state import QAState
-
-    active_graph = get_graph(self_heal=self_heal)
+    from agentic_qa.agents.orchestrator import orchestrate
+    from agentic_qa.agents.planner import plan
+    from agentic_qa.agents.writer import write
+    from agentic_qa.agents.executor import execute
+    from agentic_qa.agents.healer import heal
+    from agentic_qa.agents.reporter import report
 
     heal_label = "  [yellow]+self-heal[/yellow]" if self_heal else ""
     console.print()
@@ -97,7 +291,9 @@ def run(
         Text.from_markup(
             f"[bold cyan]Agentic QA[/bold cyan]  [dim]|[/dim]  "
             f"[white]{target}[/white]  [dim]|[/dim]  "
-            f"model: [green]{os.getenv('OPENAI_MODEL', 'gpt-4o')}[/green]"
+            f"strategy: [green]{strategy}[/green]  [dim]|[/dim]  "
+            f"provider: [green]{active_provider}[/green]  [dim]|[/dim]  "
+            f"model: [green]{_active_model_name(active_provider)}[/green]"
             f"{heal_label}"
         ),
         border_style="cyan",
@@ -105,52 +301,38 @@ def run(
     ))
     console.print()
 
-    initial_state = QAState(target=target, self_heal=self_heal)
+    state = QAState(
+        target=target,
+        self_heal=self_heal,
+        test_strategy=strategy,
+        planning_notes=planning_notes or None,
+    )
 
-    steps = [
-        ("orchestrator", "Orchestrating — classifying target"),
-        ("planner",      "Planning — analysing target and designing test cases"),
-        ("writer",       "Writing — generating pytest test code"),
-        ("executor",     "Executing — running tests"),
-    ]
-    if self_heal:
-        steps += [
-            ("healer",    "Healing — rewriting failing tests"),
-            ("executor2", "Re-executing — running healed tests"),
-        ]
-    steps.append(("reporter", "Reporting — compiling QA report"))
+    # Phase 1: Plan and review
+    state = _apply_node(state, orchestrate, "Orchestrating — classifying target")
+    state = _apply_node(state, plan, "Planning — designing test cases")
 
-    final_state: QAState | None = None
+    if state.test_plan:
+        console.print(Rule("[bold]Proposed Test Plan[/bold]"))
+        console.print(Markdown(state.test_plan))
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-        transient=False,
-    ) as progress:
-        task = progress.add_task("[cyan]Starting pipeline…", total=len(steps))
+    if interactive:
+        state = _plan_approval_loop(state)
+    elif show_plan and state.test_plan:
+        console.print(Rule("[bold]Approved Test Plan[/bold]"))
+        console.print(Markdown(state.test_plan))
 
-        for i, (node, label) in enumerate(steps):
-            progress.update(task, description=f"[cyan]{label}…", completed=i)
+    # Phase 2: Generate and execute only after approval
+    state = _apply_node(state, write, "Writing — generating pytest test code")
+    state = _apply_node(state, execute, "Executing — running tests")
 
-            stream = active_graph.stream(
-                initial_state.model_dump() if final_state is None
-                else final_state.model_dump(),
-                {"recursion_limit": 30},
-            )
+    if self_heal and not state.execution_success:
+        state = _apply_node(state, heal, "Healing — rewriting failing tests")
+        state = _apply_node(state, execute, "Re-executing — running healed tests")
 
-            for chunk in stream:
-                if node in chunk:
-                    merged = (final_state.model_dump() if final_state else initial_state.model_dump())
-                    merged.update(chunk[node])
-                    final_state = QAState(**merged)
-                    break
+    state = _apply_node(state, report, "Reporting — compiling QA report")
 
-        progress.update(task, description="[green]Pipeline complete ✓", completed=len(steps))
-
-    if final_state is None:
-        console.print("[red]Pipeline produced no output. Check your OPENAI_API_KEY.[/red]")
-        raise typer.Exit(code=1)
+    final_state = state
 
     # ── Optional verbose output ───────────────────────────────────────────────
     if show_plan and final_state.test_plan:
@@ -343,14 +525,37 @@ def _md_to_html(md: str) -> str:
     return "\n".join(out)
 
 
-def _validate_env() -> None:
-    """Abort early if required environment variables are missing."""
+def _active_model_name(provider: str) -> str:
+    """Return the currently configured model name for the selected provider."""
+    if provider == "anthropic":
+        return os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    return os.getenv("OPENAI_MODEL", "gpt-4o")
+
+
+def _validate_env(provider: str) -> None:
+    """Abort early if required environment variables are missing for provider."""
+    if provider == "anthropic":
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            console.print(
+                "[red]Error:[/red] ANTHROPIC_API_KEY is not set.\n"
+                "Copy [bold].env.example[/bold] -> [bold].env[/bold] and add your key."
+            )
+            raise typer.Exit(code=1)
+        return
+
     if not os.getenv("OPENAI_API_KEY"):
         console.print(
             "[red]Error:[/red] OPENAI_API_KEY is not set.\n"
-            "Copy [bold].env.example[/bold] → [bold].env[/bold] and add your key."
+            "Copy [bold].env.example[/bold] -> [bold].env[/bold] and add your key."
         )
         raise typer.Exit(code=1)
+
+
+@app.command("version")
+def version() -> None:
+    """Print the current version of Agentic QA."""
+    from agentic_qa import __version__
+    console.print(f"agentic-qa v{__version__}")
 
 
 if __name__ == "__main__":
