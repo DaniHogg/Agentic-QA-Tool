@@ -88,6 +88,12 @@ agentic-qa run ./src/mypackage/utils.py
 # Show the test plan and generated tests too
 agentic-qa run https://jsonplaceholder.typicode.com --show-plan --show-tests
 
+# Auto-fix failing tests with the Healer agent
+agentic-qa run https://jsonplaceholder.typicode.com --self-heal
+
+# Get a self-contained HTML report instead of Markdown
+agentic-qa run https://api.example.com --format html
+
 # Customise model and test count
 agentic-qa run https://api.example.com --model gpt-4.1 --max-tests 15
 ```
@@ -109,6 +115,8 @@ reports/
 | `--model` / `-m` | `gpt-4o` | OpenAI model to use |
 | `--max-tests` / `-n` | `10` | Target number of test cases |
 | `--reports-dir` / `-o` | `./reports` | Output directory |
+| `--self-heal` | off | Rewrite and re-run failing tests via the Healer agent |
+| `--format` / `-f` | `markdown` | Report format: `markdown` or `html` |
 | `--show-plan` | off | Print the test plan to stdout |
 | `--show-tests` | off | Print the generated test code to stdout |
 
@@ -145,7 +153,8 @@ pytest tests/ -v
 ## Roadmap
 
 - [ ] Parallel agent execution for large test suites
-- [ ] GitHub Actions integration (run on PR open)
-- [ ] HTML report with embedded test code viewer
+- [ ] GitHub Actions integration (run on PR open) ✅ done
+- [ ] HTML report with embedded test code viewer ✅ done
+- [ ] Self-healing: automatically retry failed tests with LLM-suggested fixes ✅ done
 - [ ] Support for GraphQL and gRPC targets
-- [ ] Self-healing: automatically retry failed tests with LLM-suggested fixes
+- [ ] `--watch` mode: re-run on file change

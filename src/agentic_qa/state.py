@@ -61,6 +61,10 @@ class QAState(BaseModel):
     )
 
     # ── Pipeline metadata ─────────────────────────────────────────────────────
+    self_heal: bool = Field(
+        default=False,
+        description="When True, failed tests are passed to the Healer agent before reporting.",
+    )
     errors: list[str] = Field(
         default_factory=list,
         description="Non-fatal errors collected across agents.",
