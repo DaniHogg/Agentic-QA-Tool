@@ -35,7 +35,9 @@ def _interactive_setup(
     self_heal: bool,
     planning_notes: str,
     format: str,
-) -> tuple[str, str, int, bool, str, str]:
+    project: str,
+    description_style: str,
+) -> tuple[str, str, int, bool, str, str, str, str]:
     """Prompt user for run configuration before starting pipeline."""
 
     console.print(Rule("[bold]Run Setup[/bold]"))
@@ -65,6 +67,11 @@ def _interactive_setup(
 
     chosen_self_heal = typer.confirm("Enable self-heal retry on failures?", default=self_heal)
     chosen_format = typer.prompt("Report format (markdown/html)", default=format).strip().lower()
+    chosen_project = typer.prompt("Project bucket name", default=project).strip() or "default"
+    chosen_desc_style = typer.prompt(
+        "Test description style (standard/gherkin)",
+        default=description_style,
+    ).strip().lower()
 
     return (
         resolved_target,
@@ -73,6 +80,8 @@ def _interactive_setup(
         chosen_self_heal,
         notes,
         chosen_format,
+        chosen_project,
+        chosen_desc_style,
     )
 
 
@@ -242,6 +251,31 @@ def run(
         "--planning-notes",
         help="Extra guidance for the Planner (scope, risks, must-have cases).",
     ),
+    project: str = typer.Option(
+        "default",
+        "--project",
+        help="Project bucket name for storing generated tests.",
+    ),
+    description_style: str = typer.Option(
+        "standard",
+        "--description-style",
+        help="Generated test description style: standard or gherkin.",
+    ),
+    run_with_existing_tests: bool = typer.Option(
+        False,
+        "--run-with-existing-tests",
+        help="Run selected existing tests together with newly generated tests.",
+    ),
+    existing_test: list[str] = typer.Option(
+        None,
+        "--existing-test",
+        help="Path to an existing test file to include (repeat flag for multiple).",
+    ),
+    deduplicate_tests: bool = typer.Option(
+        True,
+        "--deduplicate-tests/--no-deduplicate-tests",
+        help="Reuse existing tests in the project folder when duplicate content is detected.",
+    ),
     interactive: bool = typer.Option(
         True,
         "--interactive/--no-interactive",
@@ -282,13 +316,15 @@ def run(
     """Run the full Agentic QA pipeline against TARGET."""
 
     if interactive:
-        target, strategy, max_tests, self_heal, planning_notes, format = _interactive_setup(
+        target, strategy, max_tests, self_heal, planning_notes, format, project, description_style = _interactive_setup(
             target=target,
             strategy=strategy,
             max_tests=max_tests,
             self_heal=self_heal,
             planning_notes=planning_notes,
             format=format,
+            project=project,
+            description_style=description_style,
         )
 
     if not target:
@@ -298,6 +334,11 @@ def run(
     strategy = strategy.strip().lower()
     if strategy not in ("smoke", "sanity", "regression", "custom"):
         console.print("[red]Error:[/red] --strategy must be smoke, sanity, regression, or custom.")
+        raise typer.Exit(code=1)
+
+    description_style = description_style.strip().lower()
+    if description_style not in ("standard", "gherkin"):
+        console.print("[red]Error:[/red] --description-style must be 'standard' or 'gherkin'.")
         raise typer.Exit(code=1)
 
     mode = mode.strip().lower()
@@ -342,6 +383,7 @@ def run(
         Text.from_markup(
             f"[bold cyan]Agentic QA[/bold cyan]  [dim]|[/dim]  "
             f"[white]{target}[/white]  [dim]|[/dim]  "
+            f"project: [green]{project}[/green]  [dim]|[/dim]  "
             f"mode: [green]{mode}[/green]  [dim]|[/dim]  "
             f"strategy: [green]{strategy}[/green]  [dim]|[/dim]  "
             f"provider: [green]{active_provider}[/green]  [dim]|[/dim]  "
@@ -358,6 +400,11 @@ def run(
         self_heal=self_heal,
         test_strategy=strategy,
         planning_notes=planning_notes or None,
+        project_name=project,
+        description_style=description_style,
+        run_with_existing_tests=run_with_existing_tests,
+        existing_test_files=existing_test or [],
+        deduplicate_tests=deduplicate_tests,
     )
 
     # Phase 1: Plan and review
@@ -413,6 +460,8 @@ def run(
 
     if final_state.test_file_path:
         console.print(f"  [dim]Tests file :[/dim] {final_state.test_file_path}")
+    if final_state.duplicate_reused and final_state.duplicate_source_path:
+        console.print(f"  [dim]Duplicate reused :[/dim] {final_state.duplicate_source_path}")
     if html_path:
         console.print(f"  [dim]HTML report :[/dim] {html_path}")
     elif final_state.report_path:
@@ -578,15 +627,11 @@ def _md_to_html(md: str) -> str:
 
 def _artifact_candidates(reports_dir: Path) -> list[Path]:
     """Return generated artifact files eligible for cleanup."""
-    patterns = [
-        "generated_tests_*.py",
-        "report_*.md",
-        "report_*.html",
-        "report_*.json",
-    ]
     files: list[Path] = []
-    for pattern in patterns:
-        files.extend(reports_dir.glob(pattern))
+    files.extend(reports_dir.glob("report_*.md"))
+    files.extend(reports_dir.glob("report_*.html"))
+    files.extend(reports_dir.glob("report_*.json"))
+    files.extend(reports_dir.rglob("generated_tests_*.py"))
     return sorted(set(files))
 
 

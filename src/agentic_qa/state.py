@@ -28,6 +28,26 @@ class QAState(BaseModel):
         default=None,
         description="Optional user notes to influence generated test cases.",
     )
+    project_name: str = Field(
+        default="default",
+        description="Logical project bucket for generated tests and historical test reuse.",
+    )
+    description_style: str = Field(
+        default="standard",
+        description="Test description style: standard or gherkin.",
+    )
+    run_with_existing_tests: bool = Field(
+        default=False,
+        description="When True, selected prior tests run alongside generated tests.",
+    )
+    existing_test_files: list[str] = Field(
+        default_factory=list,
+        description="Absolute paths to existing test files selected for combined execution.",
+    )
+    deduplicate_tests: bool = Field(
+        default=True,
+        description="When True, writer reuses existing project tests that appear duplicate.",
+    )
 
     # ── Planner output ────────────────────────────────────────────────────────
     test_plan: Optional[str] = Field(
@@ -43,6 +63,18 @@ class QAState(BaseModel):
     test_file_path: Optional[str] = Field(
         default=None,
         description="Absolute path to the saved test file on disk.",
+    )
+    generated_test_files: list[str] = Field(
+        default_factory=list,
+        description="Absolute paths to generated/reused per-test files for this run.",
+    )
+    duplicate_reused: bool = Field(
+        default=False,
+        description="True when generated tests were replaced with an existing duplicate file.",
+    )
+    duplicate_source_path: Optional[str] = Field(
+        default=None,
+        description="Existing file path reused due to duplicate match.",
     )
 
     # ── Executor output ───────────────────────────────────────────────────────

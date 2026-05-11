@@ -11,6 +11,10 @@ build/
 reports/*.md
 reports/*.json
 reports/generated_tests_*.py
+reports/projects/**/tests/generated_test_*.py
+reports/projects/**/tests/generated_tests_*.py
+reports/projects/**/tests/conftest.py
+reports/ui_run_history.jsonl
 reports/*.html
 .vscode/
 .venv/

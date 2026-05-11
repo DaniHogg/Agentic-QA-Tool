@@ -19,6 +19,7 @@ dependencies = [
     "pytest-asyncio>=0.23",
     "typer>=0.12",
     "rich>=13.7",
+    "streamlit>=1.35",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
     "jsonschema>=4.22",
@@ -33,6 +34,7 @@ dev = [
 
 [project.scripts]
 agentic-qa = "agentic_qa.cli:app"
+agentic-qa-ui = "agentic_qa.ui:launch"
 
 [tool.setuptools.packages.find]
 where = ["src"]

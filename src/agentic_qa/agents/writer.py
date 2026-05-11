@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import os
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -29,10 +31,12 @@ Rules you MUST follow:
 10. Add a brief comment above each test explaining what it validates.
 11. Do NOT use unittest.TestCase — use plain pytest functions only.
 12. Handle potential network errors gracefully (wrap in try/except where appropriate).
+13. If description_style is "gherkin", use Given/When/Then comments above each test.
 
 Target: {target}
 Target type: {target_type}
 Requested strategy: {test_strategy}
+Description style: {description_style}
 """
 
 
@@ -46,6 +50,7 @@ def write(state: QAState) -> dict:
         target=state.target,
         target_type=state.target_type,
         test_strategy=state.test_strategy,
+        description_style=state.description_style,
         timestamp=timestamp,
     )
 
@@ -57,17 +62,52 @@ def write(state: QAState) -> dict:
     response = llm.invoke(messages)
     code = _strip_markdown_fences(response.content)
 
-    # Save generated test file
+    # Save generated test file in a project-specific folder
     reports_dir = Path(os.getenv("REPORTS_DIR", "./reports"))
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    project_slug = _slugify(state.project_name or "default")
+    project_tests_dir = reports_dir / "projects" / project_slug / "tests"
+    project_tests_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_project_conftest(project_tests_dir, target=state.target, target_type=state.target_type or "api")
+
     run_id = uuid.uuid4().hex[:8]
-    test_file = reports_dir / f"generated_tests_{run_id}.py"
-    test_file.write_text(code, encoding="utf-8")
+    per_test_units = _build_per_test_files(code, timestamp=timestamp)
+
+    generated_paths: list[str] = []
+    written_contents: list[str] = []
+    duplicate_reused = False
+    duplicate_source_path = None
+    writer_errors = list(state.errors)
+
+    for idx, unit in enumerate(per_test_units, start=1):
+        if state.deduplicate_tests:
+            duplicate_path = _find_duplicate_test(project_tests_dir, unit["code"])
+            if duplicate_path:
+                duplicate_reused = True
+                duplicate_source_path = str(duplicate_path.resolve())
+                generated_paths.append(str(duplicate_path.resolve()))
+                try:
+                    written_contents.append(duplicate_path.read_text(encoding="utf-8"))
+                except OSError:
+                    written_contents.append(unit["code"])
+                writer_errors.append(f"Writer: reused duplicate test file {duplicate_path.name}")
+                continue
+
+        safe_name = _slugify(unit["test_name"]).replace("-", "_")
+        test_file = project_tests_dir / f"generated_{safe_name}_{run_id}_{idx:02d}.py"
+        test_file.write_text(unit["code"], encoding="utf-8")
+        generated_paths.append(str(test_file.resolve()))
+        written_contents.append(unit["code"])
+
+    primary_file = generated_paths[0] if generated_paths else None
 
     return {
-        "generated_tests": code,
-        "test_file_path": str(test_file.resolve()),
+        "generated_tests": "\n\n\n".join(written_contents) if written_contents else code,
+        "test_file_path": primary_file,
+        "generated_test_files": generated_paths,
+        "duplicate_reused": duplicate_reused,
+        "duplicate_source_path": duplicate_source_path,
         "messages": state.messages + messages + [response],
+        "errors": writer_errors,
     }
 
 
@@ -79,3 +119,213 @@ def _strip_markdown_fences(text: str) -> str:
     if lines and lines[-1].startswith("```"):
         lines = lines[:-1]
     return "\n".join(lines)
+
+
+def _slugify(text: str) -> str:
+    """Project name to filesystem-safe slug."""
+    text = re.sub(r"[^a-zA-Z0-9]+", "-", text.strip().lower())
+    return text.strip("-") or "default"
+
+
+def _normalize_code(text: str) -> str:
+    """Normalize test code for duplicate detection."""
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+        lines.append(stripped)
+    return "\n".join(lines)
+
+
+def _extract_test_names(text: str) -> set[str]:
+    """Collect pytest test function names for overlap checks."""
+    return set(re.findall(r"^def\s+(test_[a-zA-Z0-9_]+)\s*\(", text, flags=re.MULTILINE))
+
+
+def _find_duplicate_test(project_tests_dir: Path, generated_code: str) -> Path | None:
+    """Find existing test file that appears equivalent to generated output."""
+    generated_norm = _normalize_code(generated_code)
+    generated_names = _extract_test_names(generated_code)
+
+    if not generated_norm:
+        return None
+
+    for candidate in project_tests_dir.glob("*.py"):
+        try:
+            existing = candidate.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        if _normalize_code(existing) == generated_norm:
+            return candidate
+
+        existing_names = _extract_test_names(existing)
+        if generated_names and existing_names and generated_names.issubset(existing_names):
+            return candidate
+
+    return None
+
+
+def _build_per_test_files(code: str, *, timestamp: str) -> list[dict[str, str]]:
+    """Split generated code into one module per pytest test function."""
+    parsed = _split_code_by_test_function(code)
+    if not parsed:
+        fallback = _render_test_module(code, "Generated test", timestamp=timestamp)
+        return [{"test_name": "generated_test", "description": "Generated test", "code": fallback}]
+
+    modules: list[dict[str, str]] = []
+    shared_code = parsed["shared_code"]
+    for test in parsed["tests"]:
+        modules.append(
+            {
+                "test_name": test["name"],
+                "description": test["description"],
+                "code": _render_test_module(
+                    test["code"],
+                    test["description"],
+                    timestamp=timestamp,
+                    shared_code=shared_code,
+                ),
+            }
+        )
+    return modules
+
+
+def _split_code_by_test_function(code: str) -> dict | None:
+    """Return shared module code and isolated test function blocks."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+
+    lines = code.splitlines()
+    shared_segments: list[str] = []
+    tests: list[dict[str, str]] = []
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+            block = _extract_node_with_leading_comments(lines, node)
+            tests.append(
+                {
+                    "name": node.name,
+                    "description": _description_from_block(block, node.name),
+                    "code": block,
+                }
+            )
+            continue
+
+        if _is_module_docstring_expr(node):
+            continue
+
+        segment = _extract_node(lines, node)
+        if segment.strip():
+            shared_segments.append(segment)
+
+    if not tests:
+        return None
+
+    return {"shared_code": "\n\n".join(shared_segments).strip(), "tests": tests}
+
+
+def _extract_node(lines: list[str], node: ast.AST) -> str:
+    start = getattr(node, "lineno", 1)
+    end = getattr(node, "end_lineno", start)
+    return "\n".join(lines[start - 1:end]).rstrip()
+
+
+def _extract_node_with_leading_comments(lines: list[str], node: ast.AST) -> str:
+    start = min(
+        [getattr(node, "lineno", 1)]
+        + [getattr(decorator, "lineno", getattr(node, "lineno", 1)) for decorator in getattr(node, "decorator_list", [])]
+    )
+    end = getattr(node, "end_lineno", start)
+
+    idx = start - 2
+    while idx >= 0:
+        stripped = lines[idx].strip()
+        if stripped.startswith("#") or not stripped:
+            idx -= 1
+            continue
+        break
+
+    comment_start = idx + 2
+    return "\n".join(lines[comment_start - 1:end]).rstrip()
+
+
+def _description_from_block(block: str, default_name: str) -> str:
+    for line in block.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            text = stripped.lstrip("#").strip()
+            if text:
+                return text
+            continue
+        if not stripped.startswith("@") and not stripped:
+            continue
+        break
+
+    friendly = default_name.replace("test_", "", 1).replace("_", " ").strip()
+    return friendly or "Generated test"
+
+
+def _render_test_module(test_code: str, description: str, *, timestamp: str, shared_code: str = "") -> str:
+    safe_description = description.replace('"""', "'''").strip() or "Generated test"
+    module_doc = (
+        '"""Generated by Agentic QA.\n'
+        f"Description: {safe_description}\n"
+        f"Generated: {timestamp}\n"
+        '"""'
+    )
+
+    parts = [module_doc]
+    if shared_code.strip():
+        parts.append(shared_code.strip())
+    parts.append(test_code.strip())
+    return "\n\n".join(parts).strip() + "\n"
+
+
+def _is_module_docstring_expr(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Expr):
+        return False
+    value = getattr(node, "value", None)
+    if isinstance(value, ast.Constant):
+        return isinstance(value.value, str)
+    return False
+
+
+def _ensure_project_conftest(project_tests_dir: Path, *, target: str, target_type: str) -> None:
+    """Create a shared conftest.py so fixtures are available across split files."""
+    conftest_path = project_tests_dir / "conftest.py"
+
+    if target_type == "api":
+        content = (
+            "import httpx\n"
+            "import pytest\n\n"
+            f'TARGET = "{target}"\n\n'
+            "@pytest.fixture\n"
+            "def client():\n"
+            "    with httpx.Client(base_url=TARGET, timeout=10.0) as c:\n"
+            "        yield c\n"
+        )
+    elif target_type == "web":
+        content = (
+            "import pytest\n"
+            "from playwright.sync_api import sync_playwright\n\n"
+            f'TARGET = "{target}"\n\n'
+            "@pytest.fixture\n"
+            "def browser():\n"
+            "    with sync_playwright() as p:\n"
+            "        browser = p.chromium.launch(headless=True)\n"
+            "        yield browser\n"
+            "        browser.close()\n"
+        )
+    else:
+        content = "import pytest\n"
+
+    # Keep this deterministic per run target while avoiding churn when unchanged.
+    existing = conftest_path.read_text(encoding="utf-8") if conftest_path.exists() else None
+    if existing != content:
+        conftest_path.write_text(content, encoding="utf-8")

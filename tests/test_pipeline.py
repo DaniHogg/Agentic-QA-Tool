@@ -7,7 +7,7 @@ import pytest
 
 from agentic_qa.state import QAState
 from agentic_qa.agents.executor import _parse_summary, execute
-from agentic_qa.agents.writer import _strip_markdown_fences
+from agentic_qa.agents.writer import _strip_markdown_fences, _build_per_test_files
 from agentic_qa.agents.reporter import _slugify
 
 
@@ -45,6 +45,23 @@ def test_strip_markdown_fences_generic_fence():
     result = _strip_markdown_fences(code)
     assert "```" not in result
     assert "import os" in result
+
+
+def test_build_per_test_files_splits_and_embeds_description():
+    source = '''import pytest
+
+# validates first scenario
+def test_first_case():
+    assert True
+
+# validates second scenario
+def test_second_case():
+    assert True
+'''
+    modules = _build_per_test_files(source, timestamp="2026-05-11 00:00 UTC")
+    assert len(modules) == 2
+    assert "Description: validates first scenario" in modules[0]["code"]
+    assert "Description: validates second scenario" in modules[1]["code"]
 
 
 # ── Executor helpers ───────────────────────────────────────────────────────────

@@ -12,17 +12,33 @@ from agentic_qa.state import QAState
 def execute(state: QAState) -> dict:
     """Run the generated test file with pytest and capture output."""
 
-    if not state.test_file_path:
+    generated = list(state.generated_test_files or [])
+    if not generated and state.test_file_path:
+        generated = [state.test_file_path]
+
+    if not generated:
         return {
             "execution_output": "No test file was generated.",
             "execution_success": False,
-            "errors": state.errors + ["Executor: test_file_path is None"],
+            "errors": state.errors + ["Executor: no generated test files were provided"],
         }
+
+    test_files = generated
+    if state.run_with_existing_tests and state.existing_test_files:
+        test_files.extend(state.existing_test_files)
+
+    # Keep order while removing duplicates
+    dedup_files: list[str] = []
+    for file in test_files:
+        if file not in dedup_files:
+            dedup_files.append(file)
 
     result = subprocess.run(
         [
-            sys.executable, "-m", "pytest",
-            state.test_file_path,
+            sys.executable,
+            "-m",
+            "pytest",
+            *dedup_files,
             "--tb=short",
             "-v",
             "--no-header",
