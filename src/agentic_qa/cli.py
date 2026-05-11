@@ -95,6 +95,45 @@ def _apply_node(state, fn: Callable, label: str):
     return QAState(**merged)
 
 
+def _run_node(state, fn: Callable, label: str, detailed: bool):
+    """Run a node with optional user-visible step logging."""
+    if detailed:
+        console.print(Rule(f"[bold]{label}[/bold]"))
+        console.print(f"[cyan]Starting:[/cyan] {label}")
+
+    updated = _apply_node(state, fn, label)
+
+    if detailed:
+        console.print(f"[green]Completed:[/green] {label}")
+
+    return updated
+
+
+def _render_intermediate_outputs(state, *, detailed: bool, show_plan: bool, show_tests: bool) -> None:
+    """Display plan/code/results based on selected verbosity mode."""
+    if detailed:
+        if state.test_plan:
+            console.print(Rule("[bold]Test Plan[/bold]"))
+            console.print(Markdown(state.test_plan))
+
+        if state.generated_tests:
+            console.print(Rule("[bold]Generated Tests[/bold]"))
+            console.print(state.generated_tests)
+
+        if state.execution_output:
+            console.print(Rule("[bold]Execution Output[/bold]"))
+            console.print(state.execution_output)
+        return
+
+    if show_plan and state.test_plan:
+        console.print(Rule("[bold]Test Plan[/bold]"))
+        console.print(Markdown(state.test_plan))
+
+    if show_tests and state.generated_tests:
+        console.print(Rule("[bold]Generated Tests[/bold]"))
+        console.print(state.generated_tests)
+
+
 def _plan_approval_loop(state):
     """Show plan, collect approval, and apply requested edits before execution."""
     from agentic_qa.state import QAState
@@ -234,6 +273,11 @@ def run(
         "--format", "-f",
         help="Report output format: 'markdown' (default) or 'html'.",
     ),
+    mode: str = typer.Option(
+        "detailed",
+        "--mode",
+        help="Run output mode: 'detailed' (default) or 'quiet'.",
+    ),
 ) -> None:
     """Run the full Agentic QA pipeline against TARGET."""
 
@@ -255,6 +299,12 @@ def run(
     if strategy not in ("smoke", "sanity", "regression", "custom"):
         console.print("[red]Error:[/red] --strategy must be smoke, sanity, regression, or custom.")
         raise typer.Exit(code=1)
+
+    mode = mode.strip().lower()
+    if mode not in ("detailed", "quiet"):
+        console.print("[red]Error:[/red] --mode must be 'detailed' or 'quiet'.")
+        raise typer.Exit(code=1)
+    detailed_mode = mode == "detailed"
 
     active_provider = (provider or os.getenv("LLM_PROVIDER", "openai")).strip().lower()
     _validate_env(active_provider)
@@ -292,6 +342,7 @@ def run(
         Text.from_markup(
             f"[bold cyan]Agentic QA[/bold cyan]  [dim]|[/dim]  "
             f"[white]{target}[/white]  [dim]|[/dim]  "
+            f"mode: [green]{mode}[/green]  [dim]|[/dim]  "
             f"strategy: [green]{strategy}[/green]  [dim]|[/dim]  "
             f"provider: [green]{active_provider}[/green]  [dim]|[/dim]  "
             f"model: [green]{_active_model_name(active_provider)}[/green]"
@@ -310,39 +361,38 @@ def run(
     )
 
     # Phase 1: Plan and review
-    state = _apply_node(state, orchestrate, "Orchestrating — classifying target")
-    state = _apply_node(state, plan, "Planning — designing test cases")
+    state = _run_node(state, orchestrate, "Orchestrator", detailed_mode)
+    state = _run_node(state, plan, "Planner", detailed_mode)
 
-    if state.test_plan:
+    if detailed_mode and state.test_plan:
         console.print(Rule("[bold]Proposed Test Plan[/bold]"))
         console.print(Markdown(state.test_plan))
 
     if interactive:
         state = _plan_approval_loop(state)
-    elif show_plan and state.test_plan:
+    elif show_plan and state.test_plan and not detailed_mode:
         console.print(Rule("[bold]Approved Test Plan[/bold]"))
         console.print(Markdown(state.test_plan))
 
     # Phase 2: Generate and execute only after approval
-    state = _apply_node(state, write, "Writing — generating pytest test code")
-    state = _apply_node(state, execute, "Executing — running tests")
+    state = _run_node(state, write, "Writer", detailed_mode)
+    state = _run_node(state, execute, "Executor", detailed_mode)
 
     if self_heal and not state.execution_success:
-        state = _apply_node(state, heal, "Healing — rewriting failing tests")
-        state = _apply_node(state, execute, "Re-executing — running healed tests")
+        state = _run_node(state, heal, "Healer", detailed_mode)
+        state = _run_node(state, execute, "Executor (retry)", detailed_mode)
 
-    state = _apply_node(state, report, "Reporting — compiling QA report")
+    state = _run_node(state, report, "Reporter", detailed_mode)
 
     final_state = state
 
-    # ── Optional verbose output ───────────────────────────────────────────────
-    if show_plan and final_state.test_plan:
-        console.print(Rule("[bold]Test Plan[/bold]"))
-        console.print(Markdown(final_state.test_plan))
-
-    if show_tests and final_state.generated_tests:
-        console.print(Rule("[bold]Generated Tests[/bold]"))
-        console.print(final_state.generated_tests)
+    # ── Intermediate outputs ──────────────────────────────────────────────────
+    _render_intermediate_outputs(
+        final_state,
+        detailed=detailed_mode,
+        show_plan=show_plan,
+        show_tests=show_tests,
+    )
 
     # ── HTML report (optional) ────────────────────────────────────────────────
     html_path: Optional[str] = None

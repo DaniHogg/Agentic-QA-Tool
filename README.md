@@ -81,6 +81,12 @@ agentic-qa run https://jsonplaceholder.typicode.com
 # planning notes, and asks for plan approval before execution.
 agentic-qa run https://jsonplaceholder.typicode.com --interactive
 
+# Detailed mode is default: logs each stage and shows plan/code/execution output
+agentic-qa run https://jsonplaceholder.typicode.com --provider anthropic --mode detailed
+
+# Quiet mode: minimal output while running full process
+agentic-qa run https://jsonplaceholder.typicode.com --provider anthropic --mode quiet
+
 # Non-interactive run (CI-friendly)
 agentic-qa run https://jsonplaceholder.typicode.com --no-interactive --strategy smoke
 
@@ -142,6 +148,7 @@ agentic-qa clean --all --apply
 | `--strategy` / `-s` | `smoke` | Test strategy: `smoke`, `sanity`, `regression`, `custom` |
 | `--planning-notes` | empty | Extra planning instructions for required scenarios |
 | `--interactive` / `--no-interactive` | `--interactive` | Enable setup prompts and plan approval before execution |
+| `--mode` | `detailed` | Output mode: `detailed` (step logs + intermediate outputs) or `quiet` |
 | `--reports-dir` / `-o` | `./reports` | Output directory |
 | `--self-heal` | off | Rewrite and re-run failing tests via the Healer agent |
 | `--format` / `-f` | `markdown` | Report format: `markdown` or `html` |
@@ -197,3 +204,7 @@ pytest tests/ -v
 - [ ] Self-healing: automatically retry failed tests with LLM-suggested fixes ✅ done
 - [ ] Support for GraphQL and gRPC targets
 - [ ] `--watch` mode: re-run on file change
+
+
+
+![alt text](image.png)
