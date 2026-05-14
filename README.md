@@ -190,11 +190,14 @@ What the UI provides now:
 - Lightweight context recall from previous UI runs (`reports/ui_run_history.jsonl`)
 - Previous-test picker shows human-readable descriptions (not raw code snippets)
 - Project-level run report table (date, description, success/failure, exit code, target, strategy)
-- Duplicate-reuse notice when an existing test was reused instead of generating a duplicate
+- Reuse scoring table with per-case score bands, actions, and reasons
+- Mid-band reuse approval controls before execution
+- Reuse decision summary and coverage outcome visibility after execution
 - Export buttons for project run reports (CSV and JSON)
 
 Generated tests are now written as one test per file under each project folder, and each file includes a module description header for easier reuse and selection.
 For split-file reliability, a project-level `conftest.py` is generated so shared fixtures (like `client`) are available to all files.
+High-confidence reuse candidates are auto-reused, mid-confidence candidates require explicit approval, and uncovered approved plan cases trigger targeted fallback generation.
 
 This is intentionally a simple base so you can customize it for application-specific workflows.
 
@@ -220,13 +223,30 @@ What is currently persisted to SQLite memory:
 - Plan-case decisions (approve/reject, reason, optional edited case text)
 - Test-file decisions (approve/reject, reason, content hash)
 - Post-run reviewer feedback (useful/not useful, defect quality, notes)
+- Reuse decision events (score, threshold band, final action, override status, reason)
 
 How context is currently used during generation:
 
 - Active now: selected prior runs from JSONL can be appended to planning notes via the UI recall panel.
-- Not yet fully active: the structured SQLite memory store is currently capture/query-ready, but is not yet directly injected into Planner/Writer prompts as ranked retrieval examples.
+- Active now: reuse scoring compares generated case intent against project test history and can auto-reuse high-band matches.
+- Active now: mid-band reuse is approval-gated in UI, and final decisions are logged for tuning.
+- Still next phase: direct ranked retrieval from SQLite memory into Planner/Writer prompts remains to be integrated.
 
-So today, memory is durable and auditable, with partial prompt-time use (JSONL recall) and full retrieval-driven generation planned for the next phase.
+So today, memory is durable and auditable, with active reuse decisioning plus partial prompt-time use (JSONL recall), while full retrieval-driven prompt injection remains the next phase.
+
+### Reuse Engine Tuning (Current)
+
+Reuse scoring and thresholds can be tuned via environment variables:
+
+- `REUSE_WEIGHT_INTENT` (default `0.35`)
+- `REUSE_WEIGHT_METHOD` (default `0.25`)
+- `REUSE_WEIGHT_ORIGIN` (default `0.20`)
+- `REUSE_WEIGHT_QUALITY` (default `0.20`)
+- `REUSE_THRESHOLD_HIGH` (default `0.85`)
+- `REUSE_THRESHOLD_MID` (default `0.70`)
+- `REUSE_QUALITY_MINIMUM` (default `0.60`)
+
+Weights are normalized automatically if custom values do not sum to 1.0.
 
 ---
 

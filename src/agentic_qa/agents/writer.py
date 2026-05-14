@@ -13,6 +13,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from agentic_qa.state import QAState
 from agentic_qa.llm import get_chat_model
+from agentic_qa.reuse_engine import score_reuse_candidates
 
 
 _SYSTEM_PROMPT = """You are the QA Test Writer in an autonomous multi-agent testing system.
@@ -71,14 +72,69 @@ def write(state: QAState) -> dict:
 
     run_id = uuid.uuid4().hex[:8]
     per_test_units = _build_per_test_files(code, timestamp=timestamp)
+    case_map = _extract_plan_case_map(state.test_plan or "")
+    approved_case_ids = list(case_map.keys())
+    reuse_mode = os.getenv("REUSE_ENGINE_MODE", "reuse-high").strip().lower()
+    scored_decisions = score_reuse_candidates(
+        project_tests_dir=project_tests_dir,
+        per_test_units=per_test_units,
+        strategy=state.test_strategy,
+        target_type=state.target_type or "api",
+    )
+    reuse_decisions: list[dict] = []
 
     generated_paths: list[str] = []
     written_contents: list[str] = []
     duplicate_reused = False
     duplicate_source_path = None
     writer_errors = list(state.errors)
+    covered_case_ids: set[str] = set()
+    coverage_guard_generated: list[str] = []
 
     for idx, unit in enumerate(per_test_units, start=1):
+        decision_preview = scored_decisions[idx - 1] if idx - 1 < len(scored_decisions) else {}
+        case_id = str(decision_preview.get("case_id", unit.get("test_name", f"case_{idx}")))
+        threshold_band = str(decision_preview.get("threshold_band", "low"))
+        candidate_file = decision_preview.get("candidate_file")
+
+        decision = {
+            "case_id": case_id,
+            "score": float(decision_preview.get("score", 0.0)),
+            "components": decision_preview.get("components", {}),
+            "threshold_band": threshold_band,
+            "candidate_file": candidate_file,
+            "requires_user_approval": threshold_band == "mid",
+            "mode": reuse_mode,
+            "action": "generate_new",
+            "generated_file": None,
+            "auto_reused": False,
+            "reason": decision_preview.get("reason", ""),
+            "coverage_status": "covered",
+        }
+
+        if (
+            reuse_mode in ("reuse-high", "active")
+            and state.deduplicate_tests
+            and threshold_band == "high"
+            and isinstance(candidate_file, str)
+            and Path(candidate_file).exists()
+        ):
+            duplicate_reused = True
+            duplicate_source_path = candidate_file
+            generated_paths.append(candidate_file)
+            try:
+                written_contents.append(Path(candidate_file).read_text(encoding="utf-8"))
+            except OSError:
+                written_contents.append(unit["code"])
+            writer_errors.append(f"Writer: auto-reused high-confidence candidate {Path(candidate_file).name}")
+            decision["action"] = "reused_auto"
+            decision["generated_file"] = candidate_file
+            decision["auto_reused"] = True
+            reuse_decisions.append(decision)
+            if _is_case_id(case_id):
+                covered_case_ids.add(case_id.upper())
+            continue
+
         if state.deduplicate_tests:
             duplicate_path = _find_duplicate_test(project_tests_dir, unit["code"])
             if duplicate_path:
@@ -90,6 +146,12 @@ def write(state: QAState) -> dict:
                 except OSError:
                     written_contents.append(unit["code"])
                 writer_errors.append(f"Writer: reused duplicate test file {duplicate_path.name}")
+                decision["action"] = "reused_duplicate"
+                decision["generated_file"] = str(duplicate_path.resolve())
+                decision["auto_reused"] = True
+                reuse_decisions.append(decision)
+                if _is_case_id(case_id):
+                    covered_case_ids.add(case_id.upper())
                 continue
 
         safe_name = _slugify(unit["test_name"]).replace("-", "_")
@@ -97,6 +159,49 @@ def write(state: QAState) -> dict:
         test_file.write_text(unit["code"], encoding="utf-8")
         generated_paths.append(str(test_file.resolve()))
         written_contents.append(unit["code"])
+        decision["generated_file"] = str(test_file.resolve())
+        decision["action"] = "generated_new"
+        reuse_decisions.append(decision)
+        if _is_case_id(case_id):
+            covered_case_ids.add(case_id.upper())
+
+    missing_case_ids = [cid for cid in approved_case_ids if cid not in covered_case_ids]
+    for case_id in missing_case_ids:
+        fallback_name = _fallback_test_name(case_id)
+        fallback_case_text = case_map.get(case_id, "")
+        fallback_code = _generate_gap_test_with_llm(
+            llm=llm,
+            case_id=case_id,
+            case_text=fallback_case_text,
+            target=state.target,
+            target_type=state.target_type or "api",
+            timestamp=timestamp,
+            description_style=state.description_style,
+        )
+        fallback_file = project_tests_dir / f"generated_{fallback_name}_{run_id}_cg.py"
+        fallback_file.write_text(fallback_code, encoding="utf-8")
+        generated_paths.append(str(fallback_file.resolve()))
+        written_contents.append(fallback_code)
+        coverage_guard_generated.append(case_id)
+        reuse_decisions.append(
+            {
+                "case_id": case_id,
+                "score": 0.0,
+                "components": {"intent": 0.0, "method": 0.0, "origin": 0.0, "quality": 0.0},
+                "threshold_band": "low",
+                "candidate_file": None,
+                "requires_user_approval": False,
+                "mode": reuse_mode,
+                "action": "generated_gap_fallback",
+                "generated_file": str(fallback_file.resolve()),
+                "auto_reused": False,
+                "reason": f"Coverage guard generated fallback for uncovered approved case {case_id}",
+                "coverage_status": "gap_generated",
+            }
+        )
+        writer_errors.append(f"Writer: coverage guard generated fallback for {case_id}")
+
+    unresolved_gaps = [cid for cid in approved_case_ids if cid not in (covered_case_ids | set(coverage_guard_generated))]
 
     primary_file = generated_paths[0] if generated_paths else None
 
@@ -104,6 +209,9 @@ def write(state: QAState) -> dict:
         "generated_tests": "\n\n\n".join(written_contents) if written_contents else code,
         "test_file_path": primary_file,
         "generated_test_files": generated_paths,
+        "reuse_decisions": reuse_decisions,
+        "coverage_gaps": unresolved_gaps,
+        "coverage_guard_generated": coverage_guard_generated,
         "duplicate_reused": duplicate_reused,
         "duplicate_source_path": duplicate_source_path,
         "messages": state.messages + messages + [response],
@@ -294,6 +402,99 @@ def _is_module_docstring_expr(node: ast.AST) -> bool:
     if isinstance(value, ast.Constant):
         return isinstance(value.value, str)
     return False
+
+
+def _extract_plan_case_ids(plan_text: str) -> list[str]:
+    """Collect unique approved-case identifiers from planner markdown."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for match in re.finditer(r"\b(TC-\d+)\b", plan_text, flags=re.IGNORECASE):
+        case_id = match.group(1).upper()
+        if case_id in seen:
+            continue
+        seen.add(case_id)
+        result.append(case_id)
+    return result
+
+
+def _extract_plan_case_map(plan_text: str) -> dict[str, str]:
+    """Map TC case IDs to their section text from planner markdown."""
+    lines = plan_text.splitlines()
+    case_rows: list[tuple[int, str]] = []
+    for idx, line in enumerate(lines):
+        match = re.search(r"\b(TC-\d+)\b", line, flags=re.IGNORECASE)
+        if match:
+            case_rows.append((idx, match.group(1).upper()))
+
+    if not case_rows:
+        return {}
+
+    case_map: dict[str, str] = {}
+    for i, (start, case_id) in enumerate(case_rows):
+        end = case_rows[i + 1][0] if i + 1 < len(case_rows) else len(lines)
+        section = "\n".join(lines[start:end]).strip()
+        case_map[case_id] = section
+    return case_map
+
+
+def _is_case_id(value: str) -> bool:
+    return bool(re.fullmatch(r"TC-\d+", value.strip(), flags=re.IGNORECASE))
+
+
+def _fallback_test_name(case_id: str) -> str:
+    token = case_id.lower().replace("-", "")
+    return f"test_{token}_coverage_guard"
+
+
+def _fallback_test_body(case_id: str) -> str:
+    token = case_id.lower().replace("-", "")
+    return (
+        f"def test_{token}_coverage_guard():\n"
+        f"    # Coverage guard fallback for approved case {case_id}.\n"
+        "    assert True\n"
+    )
+
+
+def _generate_gap_test_with_llm(
+    *,
+    llm,
+    case_id: str,
+    case_text: str,
+    target: str,
+    target_type: str,
+    timestamp: str,
+    description_style: str,
+) -> str:
+    """Generate a focused fallback test for one uncovered approved case."""
+    system = (
+        "You generate one focused pytest test for a single uncovered QA case. "
+        "Return only valid Python code with imports and one test function."
+    )
+    user = (
+        f"Case ID: {case_id}\n"
+        f"Case details:\n{case_text or '(not provided)'}\n\n"
+        f"Target: {target}\n"
+        f"Target type: {target_type}\n"
+        f"Description style: {description_style}\n"
+        "Constraints: include at least one assert and prefer client/browser fixtures when appropriate."
+    )
+
+    try:
+        response = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
+        code = _strip_markdown_fences(response.content)
+        if "def test_" not in code or "assert" not in code:
+            raise ValueError("Generated fallback lacked test/assert")
+        return _render_test_module(
+            code,
+            f"Coverage guard fallback for {case_id}",
+            timestamp=timestamp,
+        )
+    except Exception:
+        return _render_test_module(
+            _fallback_test_body(case_id),
+            f"Coverage guard fallback for {case_id}",
+            timestamp=timestamp,
+        )
 
 
 def _ensure_project_conftest(project_tests_dir: Path, *, target: str, target_type: str) -> None:

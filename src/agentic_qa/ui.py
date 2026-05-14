@@ -24,10 +24,12 @@ from agentic_qa.context_store import (
     load_plan_case_feedback,
     load_project_runs,
     load_recent_runs,
+    load_reuse_decision_events,
     load_run_feedback,
     load_test_file_feedback,
     now_iso,
     save_plan_case_feedback,
+    save_reuse_decision_events,
     save_run_feedback,
     save_test_file_feedback,
     start_memory_run,
@@ -173,6 +175,7 @@ def _reset_workflow_state() -> None:
             or key.startswith("plan_reason_")
             or key.startswith("plan_edit_")
             or key.startswith("approve_test_reason_")
+            or key.startswith("reuse_mid_")
         ):
             del st.session_state[key]
 
@@ -534,7 +537,59 @@ def _ui_main() -> None:
 
     if st.session_state.workflow_stage == "test_review" and st.session_state.workflow_state:
         st.markdown("### Test File Approval")
+        state = QAState(**st.session_state.workflow_state)
         generated_files = st.session_state.workflow_generated_files
+
+        if state.reuse_decisions:
+            summary_rows = []
+            for decision in state.reuse_decisions:
+                summary_rows.append(
+                    {
+                        "Case": decision.get("case_id", "n/a"),
+                        "Score": decision.get("score", 0.0),
+                        "Band": decision.get("threshold_band", "n/a"),
+                        "Action": decision.get("action", "n/a"),
+                        "Coverage": decision.get("coverage_status", "covered"),
+                        "Needs Approval": bool(decision.get("requires_user_approval", False)),
+                        "Reason": decision.get("reason", ""),
+                    }
+                )
+            st.markdown("#### Reuse Scoring")
+            st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+
+            if state.coverage_guard_generated:
+                st.info(
+                    "Coverage guard generated fallback tests for: "
+                    + ", ".join(state.coverage_guard_generated)
+                )
+            if state.coverage_gaps:
+                st.error(
+                    "Unresolved coverage gaps remain: "
+                    + ", ".join(state.coverage_gaps)
+                )
+
+            mid_band = [
+                d for d in state.reuse_decisions
+                if d.get("threshold_band") == "mid"
+                and d.get("candidate_file")
+                and d.get("generated_file")
+            ]
+            if mid_band:
+                with st.expander("Mid-Band Reuse Approval"):
+                    st.caption("Choose whether to reuse the existing candidate for mid-confidence matches.")
+                    for decision in mid_band:
+                        case_id = str(decision.get("case_id", "case"))
+                        generated_file = str(decision.get("generated_file", ""))
+                        key = f"reuse_mid_{case_id}_{generated_file}"
+                        st.checkbox(
+                            (
+                                f"Use existing candidate for {case_id} "
+                                f"(score {float(decision.get('score', 0.0)):.2f})"
+                            ),
+                            value=st.session_state.get(key, False),
+                            key=key,
+                        )
+
         _preview_test_tabs(generated_files, "approve_test")
 
         test_col1, test_col2 = st.columns(2)
@@ -549,16 +604,63 @@ def _ui_main() -> None:
                 if not approved_files:
                     st.warning("Approve at least one generated test file to run execution.")
                 else:
+                    selected_reuse_candidates: set[str] = set()
+                    finalized_decisions: list[dict] = []
+                    for decision in state.reuse_decisions:
+                        if decision.get("threshold_band") != "mid":
+                            continue
+                        candidate = decision.get("candidate_file")
+                        generated = decision.get("generated_file")
+                        if not candidate or not generated:
+                            continue
+                        key = f"reuse_mid_{decision.get('case_id', 'case')}_{generated}"
+                        if st.session_state.get(key, False):
+                            selected_reuse_candidates.add(str(candidate))
+
+                    effective_files: list[str] = []
+                    for path in approved_files:
+                        replacement = path
+                        for decision in state.reuse_decisions:
+                            if decision.get("threshold_band") != "mid":
+                                continue
+                            generated = str(decision.get("generated_file", ""))
+                            candidate = str(decision.get("candidate_file", ""))
+                            key = f"reuse_mid_{decision.get('case_id', 'case')}_{generated}"
+                            if path == generated and st.session_state.get(key, False) and candidate:
+                                replacement = candidate
+                                break
+                        if replacement not in effective_files:
+                            effective_files.append(replacement)
+
+                    for decision in state.reuse_decisions:
+                        decision_copy = dict(decision)
+                        decision_copy["approved_override"] = False
+                        if decision.get("threshold_band") == "mid":
+                            generated = str(decision.get("generated_file", ""))
+                            candidate = str(decision.get("candidate_file", ""))
+                            key = f"reuse_mid_{decision.get('case_id', 'case')}_{generated}"
+                            if st.session_state.get(key, False) and candidate:
+                                decision_copy["approved_override"] = True
+                                decision_copy["action"] = "reused_mid_approved"
+                                decision_copy["generated_file"] = candidate
+                            else:
+                                decision_copy["action"] = "generated_mid_declined"
+                        finalized_decisions.append(decision_copy)
+
                     run_id = st.session_state.workflow_run_id
                     if run_id:
-                        for test_path in generated_files:
+                        review_targets = set(generated_files) | selected_reuse_candidates
+                        for test_path in sorted(review_targets):
                             reason = st.session_state.get(f"approve_test_reason_{test_path}", "").strip()
+                            approved_flag = test_path in effective_files
+                            if test_path in selected_reuse_candidates and approved_flag and not reason:
+                                reason = "Selected as mid-band reuse candidate"
                             save_test_file_feedback(
                                 reports_dir,
                                 run_id=run_id,
                                 file_path=test_path,
                                 description=_extract_test_description(Path(test_path)),
-                                approved=(test_path in approved_files),
+                                approved=approved_flag,
                                 reason=reason,
                             )
 
@@ -566,8 +668,8 @@ def _ui_main() -> None:
                     state = _merge_state(
                         state,
                         {
-                            "generated_test_files": approved_files,
-                            "test_file_path": approved_files[0],
+                            "generated_test_files": effective_files,
+                            "test_file_path": effective_files[0],
                         },
                     )
 
@@ -614,6 +716,13 @@ def _ui_main() -> None:
                             tests_errors=state.tests_errors,
                             report_path=state.report_path,
                         )
+                        save_reuse_decision_events(
+                            reports_dir,
+                            run_id=run_id,
+                            decisions=finalized_decisions,
+                        )
+
+                    state = _merge_state(state, {"reuse_decisions": finalized_decisions})
 
                     st.session_state.workflow_state = state.model_dump()
                     st.session_state.workflow_stage = "completed"
@@ -632,6 +741,21 @@ def _ui_main() -> None:
             st.info(
                 "Duplicate test reuse enabled: existing test was reused instead of writing a new duplicate."
                 + (f" Source: {state.duplicate_source_path}" if state.duplicate_source_path else "")
+            )
+
+        if state.reuse_decisions:
+            with st.expander("Reuse Decision Summary"):
+                st.dataframe(state.reuse_decisions, use_container_width=True, hide_index=True)
+
+        if state.coverage_guard_generated:
+            st.caption(
+                "Coverage guard generated fallback tests for: "
+                + ", ".join(state.coverage_guard_generated)
+            )
+        if state.coverage_gaps:
+            st.warning(
+                "Coverage gaps still unresolved: "
+                + ", ".join(state.coverage_gaps)
             )
 
         if run_mode == "detailed" or show_plan:
@@ -709,9 +833,11 @@ def _ui_main() -> None:
             saved_plan = load_plan_case_feedback(reports_dir, run_id)
             saved_tests = load_test_file_feedback(reports_dir, run_id)
             saved_feedback = load_run_feedback(reports_dir, run_id)
+            saved_reuse = load_reuse_decision_events(reports_dir, run_id)
             st.caption(
                 "Saved memory records: "
-                f"{len(saved_plan)} plan decisions, {len(saved_tests)} test decisions, {len(saved_feedback)} run feedback item(s)."
+                f"{len(saved_plan)} plan decisions, {len(saved_tests)} test decisions, "
+                f"{len(saved_feedback)} run feedback item(s), {len(saved_reuse)} reuse decision event(s)."
             )
 
 

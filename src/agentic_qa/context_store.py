@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-CURRENT_MEMORY_SCHEMA_VERSION = 1
+CURRENT_MEMORY_SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -55,28 +55,28 @@ def init_memory_store(reports_dir: Path) -> Path:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sqlite3.connect(db_path) as conn:
-                _create_phase1_tables(conn)
-                _ensure_schema_version(conn)
+        _create_phase1_tables(conn)
+        _ensure_schema_version(conn)
 
     return db_path
 
 
 def get_memory_schema_version(reports_dir: Path) -> int:
-        """Return active memory schema version for diagnostics and migrations."""
-        db_path = init_memory_store(reports_dir)
-        with sqlite3.connect(db_path) as conn:
-                row = conn.execute(
-                        "SELECT value FROM schema_meta WHERE key = 'memory_schema_version'"
-                ).fetchone()
-                if not row:
-                        return CURRENT_MEMORY_SCHEMA_VERSION
-                return int(row[0])
+    """Return active memory schema version for diagnostics and migrations."""
+    db_path = init_memory_store(reports_dir)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'memory_schema_version'"
+        ).fetchone()
+        if not row:
+            return CURRENT_MEMORY_SCHEMA_VERSION
+        return int(row[0])
 
 
 def _create_phase1_tables(conn: sqlite3.Connection) -> None:
-        """Create all phase-1 memory tables if they do not already exist."""
-        conn.executescript(
-                """
+    """Create all phase-1 memory tables if they do not already exist."""
+    conn.executescript(
+        """
                 CREATE TABLE IF NOT EXISTS projects (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL UNIQUE,
@@ -152,61 +152,95 @@ def _create_phase1_tables(conn: sqlite3.Connection) -> None:
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES projects(id)
                 );
-                """
-        )
+
+                CREATE TABLE IF NOT EXISTS reuse_decision_events (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    case_id TEXT NOT NULL,
+                    score REAL NOT NULL,
+                    threshold_band TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    candidate_file TEXT,
+                    generated_file TEXT,
+                    requires_user_approval INTEGER NOT NULL,
+                    approved_override INTEGER NOT NULL,
+                    reason TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(run_id) REFERENCES runs(id)
+                );
+                    """
+                )
 
 
 def _ensure_schema_version(conn: sqlite3.Connection) -> None:
-        """Track and migrate schema version using schema_meta table."""
-        now = now_iso()
+    """Track and migrate schema version using schema_meta table."""
+    now = now_iso()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key = 'memory_schema_version'"
+    ).fetchone()
+
+    if not row:
         conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS schema_meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
+            """
+            INSERT INTO schema_meta (key, value, updated_at)
+            VALUES ('memory_schema_version', ?, ?)
+            """,
+            (str(CURRENT_MEMORY_SCHEMA_VERSION), now),
+        )
+        return
+
+    current = int(row[0])
+    if current > CURRENT_MEMORY_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"memory.db schema version {current} is newer than supported "
+            f"{CURRENT_MEMORY_SCHEMA_VERSION}"
         )
 
-        row = conn.execute(
-                "SELECT value FROM schema_meta WHERE key = 'memory_schema_version'"
-        ).fetchone()
-
-        if not row:
-                conn.execute(
-                        """
-                        INSERT INTO schema_meta (key, value, updated_at)
-                        VALUES ('memory_schema_version', ?, ?)
-                        """,
-                        (str(CURRENT_MEMORY_SCHEMA_VERSION), now),
-                )
-                return
-
-        current = int(row[0])
-        if current > CURRENT_MEMORY_SCHEMA_VERSION:
-                raise RuntimeError(
-                        f"memory.db schema version {current} is newer than supported "
-                        f"{CURRENT_MEMORY_SCHEMA_VERSION}"
-                )
-
-        if current < CURRENT_MEMORY_SCHEMA_VERSION:
-                _apply_memory_migrations(conn, current, CURRENT_MEMORY_SCHEMA_VERSION)
-                conn.execute(
-                        """
-                        UPDATE schema_meta
-                        SET value = ?, updated_at = ?
-                        WHERE key = 'memory_schema_version'
-                        """,
-                        (str(CURRENT_MEMORY_SCHEMA_VERSION), now),
-                )
+    if current < CURRENT_MEMORY_SCHEMA_VERSION:
+        _apply_memory_migrations(conn, current, CURRENT_MEMORY_SCHEMA_VERSION)
+        conn.execute(
+            """
+            UPDATE schema_meta
+            SET value = ?, updated_at = ?
+            WHERE key = 'memory_schema_version'
+            """,
+            (str(CURRENT_MEMORY_SCHEMA_VERSION), now),
+        )
 
 
 def _apply_memory_migrations(conn: sqlite3.Connection, from_version: int, to_version: int) -> None:
-        """Apply forward-only schema migrations between known versions."""
-        # No structural migrations yet. Placeholder is intentional for phase-2+ evolution.
-        for _version in range(from_version + 1, to_version + 1):
-                pass
+    """Apply forward-only schema migrations between known versions."""
+    for version in range(from_version + 1, to_version + 1):
+        if version == 2:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reuse_decision_events (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    case_id TEXT NOT NULL,
+                    score REAL NOT NULL,
+                    threshold_band TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    candidate_file TEXT,
+                    generated_file TEXT,
+                    requires_user_approval INTEGER NOT NULL,
+                    approved_override INTEGER NOT NULL,
+                    reason TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(run_id) REFERENCES runs(id)
+                )
+                """
+            )
 
 
 def _project_id(project_name: str) -> str:
@@ -506,6 +540,67 @@ def load_run_feedback(reports_dir: Path, run_id: str) -> list[dict[str, Any]]:
             FROM run_feedback
             WHERE run_id = ?
             ORDER BY created_at DESC
+            """,
+            (run_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def save_reuse_decision_events(
+    reports_dir: Path,
+    *,
+    run_id: str,
+    decisions: list[dict[str, Any]],
+) -> None:
+    """Persist reuse-decision outcomes for tuning and threshold analysis."""
+    if not decisions:
+        return
+
+    db_path = init_memory_store(reports_dir)
+    with sqlite3.connect(db_path) as conn:
+        for decision in decisions:
+            event_id = uuid.uuid4().hex
+            conn.execute(
+                """
+                INSERT INTO reuse_decision_events (
+                    id, run_id, case_id, score, threshold_band, action,
+                    candidate_file, generated_file, requires_user_approval,
+                    approved_override, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    run_id,
+                    str(decision.get("case_id", "unknown")),
+                    float(decision.get("score", 0.0)),
+                    str(decision.get("threshold_band", "low")),
+                    str(decision.get("action", "unknown")),
+                    decision.get("candidate_file"),
+                    decision.get("generated_file"),
+                    1 if bool(decision.get("requires_user_approval", False)) else 0,
+                    1 if bool(decision.get("approved_override", False)) else 0,
+                    str(decision.get("reason", "")),
+                    now_iso(),
+                ),
+            )
+
+
+def load_reuse_decision_events(reports_dir: Path, run_id: str) -> list[dict[str, Any]]:
+    """Load stored reuse decision events for a run."""
+    db_path = _db_path(reports_dir)
+    if not db_path.exists():
+        return []
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, run_id, case_id, score, threshold_band, action,
+                   candidate_file, generated_file, requires_user_approval,
+                   approved_override, reason, created_at
+            FROM reuse_decision_events
+            WHERE run_id = ?
+            ORDER BY created_at ASC
             """,
             (run_id,),
         ).fetchall()
