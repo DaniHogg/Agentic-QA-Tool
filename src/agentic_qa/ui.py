@@ -244,6 +244,7 @@ def _ui_main() -> None:
         provider = st.selectbox("Provider", ["anthropic", "openai"], index=0)
         model = st.text_input("Model override (optional)", value="")
         strategy = st.selectbox("Strategy", ["smoke", "sanity", "regression", "custom"], index=0)
+        limit_test_count = st.checkbox("Limit test cases to max count", value=True, help="When enabled, planner aims for max count. When disabled, generates only necessary tests.")
         max_tests = st.number_input("Max test cases", min_value=1, max_value=100, value=10)
         selected_project = st.selectbox(
             "Project",
@@ -418,6 +419,7 @@ def _ui_main() -> None:
             run_with_existing_tests=run_with_existing,
             existing_test_files=selected_existing_tests,
             deduplicate_tests=deduplicate,
+            limit_test_count=limit_test_count,
         )
         state = _run_node(state, orchestrate, "Orchestrator")
         state = _run_node(state, plan, "Planner")
@@ -438,8 +440,8 @@ def _ui_main() -> None:
         )
 
         header, cases = _extract_plan_cases(state.test_plan or "")
-        for case in cases:
-            key = f"approve_plan_{case['id']}"
+        for idx, case in enumerate(cases):
+            key = f"approve_plan_{case['id']}_{idx}"
             if key not in st.session_state:
                 st.session_state[key] = True
 
@@ -456,47 +458,48 @@ def _ui_main() -> None:
         st.markdown("### Plan Approval")
         cases = st.session_state.workflow_plan_cases
         tabs = st.tabs([f"{c['id']}" for c in cases])
-        for tab, case in zip(tabs, cases):
+        for idx, (tab, case) in enumerate(zip(tabs, cases)):
             with tab:
                 st.markdown(f"**{case['title']}**")
                 st.markdown(case["body"])
                 st.checkbox(
                     "Approve this test case",
-                    value=st.session_state.get(f"approve_plan_{case['id']}", True),
-                    key=f"approve_plan_{case['id']}",
+                    value=st.session_state.get(f"approve_plan_{case['id']}_{idx}", True),
+                    key=f"approve_plan_{case['id']}_{idx}",
                 )
                 st.text_input(
                     "Feedback reason (optional)",
-                    value=st.session_state.get(f"plan_reason_{case['id']}", ""),
-                    key=f"plan_reason_{case['id']}",
+                    value=st.session_state.get(f"plan_reason_{case['id']}_{idx}", ""),
+                    key=f"plan_reason_{case['id']}_{idx}",
                     placeholder="Why approve/reject this case?",
                 )
                 st.text_area(
                     "Edited case text (optional)",
-                    value=st.session_state.get(f"plan_edit_{case['id']}", ""),
-                    key=f"plan_edit_{case['id']}",
+                    value=st.session_state.get(f"plan_edit_{case['id']}_{idx}", ""),
+                    key=f"plan_edit_{case['id']}_{idx}",
                     height=140,
                 )
 
+        def approve_all_cases(cases_list):
+            for idx in range(len(cases_list)):
+                st.session_state[f"approve_plan_{cases_list[idx]['id']}_{idx}"] = True
+
         plan_col1, plan_col2 = st.columns(2)
         with plan_col1:
-            if st.button("Approve All Test Cases"):
-                for case in cases:
-                    st.session_state[f"approve_plan_{case['id']}"] = True
-                st.rerun()
+            st.button("Approve All Test Cases", on_click=approve_all_cases, args=(cases,))
         with plan_col2:
             if st.button("Generate Tests From Approved Cases", type="primary"):
-                approved = {c["id"] for c in cases if st.session_state.get(f"approve_plan_{c['id']}", False)}
+                approved = {c["id"] for idx, c in enumerate(cases) if st.session_state.get(f"approve_plan_{c['id']}_{idx}", False)}
                 if not approved:
                     st.warning("Select at least one approved test case to continue.")
                 else:
                     run_id = st.session_state.workflow_run_id
                     revised_cases = []
                     if run_id:
-                        for case in cases:
+                        for idx, case in enumerate(cases):
                             is_approved = case["id"] in approved
-                            reason = st.session_state.get(f"plan_reason_{case['id']}", "").strip()
-                            edited_body = st.session_state.get(f"plan_edit_{case['id']}", "").strip()
+                            reason = st.session_state.get(f"plan_reason_{case['id']}_{idx}", "").strip()
+                            edited_body = st.session_state.get(f"plan_edit_{case['id']}_{idx}", "").strip()
                             selected_body = edited_body if edited_body else case["body"]
                             save_plan_case_feedback(
                                 reports_dir,
@@ -592,12 +595,13 @@ def _ui_main() -> None:
 
         _preview_test_tabs(generated_files, "approve_test")
 
+        def approve_all_tests(files_list):
+            for path in files_list:
+                st.session_state[f"approve_test_{path}"] = True
+
         test_col1, test_col2 = st.columns(2)
         with test_col1:
-            if st.button("Approve All Tests"):
-                for path in generated_files:
-                    st.session_state[f"approve_test_{path}"] = True
-                st.rerun()
+            st.button("Approve All Tests", on_click=approve_all_tests, args=(generated_files,))
         with test_col2:
             if st.button("Execute Approved Tests", type="primary"):
                 approved_files = [p for p in generated_files if st.session_state.get(f"approve_test_{p}", False)]

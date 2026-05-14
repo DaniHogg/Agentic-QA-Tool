@@ -26,8 +26,7 @@ test plan in Markdown. The plan must include:
    - Expected outcome
 3. **Risks & Assumptions** — any known gaps or assumptions
 
-Aim for {max_tests} test cases. Be specific and actionable — the Writer agent will turn
-this plan directly into runnable pytest code.
+{max_tests_guidance}
 
 You must adapt the plan to the requested strategy:
 - smoke: critical path only, high-signal checks, minimal set
@@ -89,7 +88,14 @@ def plan(state: QAState) -> dict:
     """Inspect the target and produce a structured test plan."""
 
     max_tests = int(os.getenv("MAX_TEST_CASES", "10"))
+    limit_count = state.limit_test_count
     llm = get_chat_model(temperature=0.2)
+
+    # Build guidance based on limit_test_count flag
+    if limit_count:
+        max_tests_guidance = f"Aim for {max_tests} test cases. Be specific and actionable — the Writer agent will turn this plan directly into runnable pytest code."
+    else:
+        max_tests_guidance = "Generate only the test cases that are necessary to cover the identified requirements and strategies. Do not artificially pad the plan to reach a target count — quality and coverage matter more than quantity."
 
     # Gather raw context based on target type
     tt = state.target_type or "api"
@@ -100,7 +106,7 @@ def plan(state: QAState) -> dict:
     else:
         context = _fetch_code_context(state.target)
 
-    system = _SYSTEM_PROMPT.format(max_tests=max_tests)
+    system = _SYSTEM_PROMPT.format(max_tests_guidance=max_tests_guidance)
     messages = [
         SystemMessage(content=system),
         HumanMessage(

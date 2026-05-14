@@ -47,6 +47,10 @@ class QAState(BaseModel):
         default=True,
         description="When True, writer reuses existing project tests that appear duplicate.",
     )
+    limit_test_count: bool = Field(
+        default=True,
+        description="When True, planner aims for max_tests number. When False, generates only necessary tests.",
+    )
 
     # ── Planner output ────────────────────────────────────────────────────────
     test_plan: Optional[str] = Field(
