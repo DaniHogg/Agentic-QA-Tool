@@ -93,7 +93,7 @@ def plan(state: QAState) -> dict:
 
     # Build guidance based on limit_test_count flag
     if limit_count:
-        max_tests_guidance = f"Aim for {max_tests} test cases. Be specific and actionable — the Writer agent will turn this plan directly into runnable pytest code."
+        max_tests_guidance = f"Generate only the necessary test cases up to a maximum of {max_tests}. Do not artificially pad the plan — stop once all required coverage is achieved, even if below the max."
     else:
         max_tests_guidance = "Generate only the test cases that are necessary to cover the identified requirements and strategies. Do not artificially pad the plan to reach a target count — quality and coverage matter more than quantity."
 
