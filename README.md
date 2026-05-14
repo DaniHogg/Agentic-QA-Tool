@@ -200,6 +200,36 @@ This is intentionally a simple base so you can customize it for application-spec
 
 ---
 
+## Current Context Flow (As Implemented)
+
+The project now has two context layers:
+
+1. Session context (short-lived)
+- Stored in Streamlit session state while a run is active
+- Includes current approvals, staged workflow state, and UI toggles
+- Reset by app refresh/restart or `Reset Current Workflow`
+
+2. Persisted context (durable)
+- Lightweight JSONL run history: `reports/ui_run_history.jsonl`
+- Structured SQLite memory store: `reports/knowledge/memory.db`
+- Persists across app restarts until files are removed
+
+What is currently persisted to SQLite memory:
+
+- Run lifecycle metadata (`start_memory_run`, `finalize_memory_run`)
+- Plan-case decisions (approve/reject, reason, optional edited case text)
+- Test-file decisions (approve/reject, reason, content hash)
+- Post-run reviewer feedback (useful/not useful, defect quality, notes)
+
+How context is currently used during generation:
+
+- Active now: selected prior runs from JSONL can be appended to planning notes via the UI recall panel.
+- Not yet fully active: the structured SQLite memory store is currently capture/query-ready, but is not yet directly injected into Planner/Writer prompts as ranked retrieval examples.
+
+So today, memory is durable and auditable, with partial prompt-time use (JSONL recall) and full retrieval-driven generation planned for the next phase.
+
+---
+
 ## Options
 
 | Flag | Default | Description |
