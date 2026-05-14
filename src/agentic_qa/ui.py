@@ -112,10 +112,16 @@ def _extract_plan_cases(plan_text: str) -> tuple[str, list[dict[str, str]]]:
     """Split planner markdown into individual TC blocks for approvals."""
     lines = plan_text.splitlines()
     case_rows: list[tuple[int, str, str]] = []
+    seen_ids = set()
+    
     for idx, line in enumerate(lines):
         m = re.search(r"\b(TC-\d+)\b", line, flags=re.IGNORECASE)
         if m:
-            case_rows.append((idx, m.group(1).upper(), line.strip()))
+            case_id = m.group(1).upper()
+            # Only keep first occurrence of each ID
+            if case_id not in seen_ids:
+                case_rows.append((idx, case_id, line.strip()))
+                seen_ids.add(case_id)
 
     if not case_rows:
         return "", [{"id": "TC-001", "title": "Generated Test Case", "body": plan_text.strip()}]
@@ -127,6 +133,9 @@ def _extract_plan_cases(plan_text: str) -> tuple[str, list[dict[str, str]]]:
         body = "\n".join(lines[start:end]).strip()
         title = re.sub(r"^[\-\*\d\.\s]*", "", title_line).strip()
         cases.append({"id": case_id, "title": title or case_id, "body": body})
+
+    # Sort by numeric part of ID (TC-001, TC-002, ..., TC-010, etc.)
+    cases.sort(key=lambda c: int(re.search(r"\d+", c["id"]).group()) if re.search(r"\d+", c["id"]) else 0)
 
     return header, cases
 
