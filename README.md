@@ -324,15 +324,6 @@ pytest tests/ -v
 
 ---
 
-## Why This Is Interesting (for Recruiters)
-
-- **Real agentic architecture** — not a single LLM call, but a coordinated multi-node graph with shared state
-- **Generates runnable artefacts** — the output is actual `.py` test files you can inspect, version, and re-run
-- **Target-agnostic** — one tool handles APIs, UIs, and source code
-- **Observable** — every agent's reasoning is captured in the shared message history; the report explains failures
-
----
-
 ## Roadmap
 
 - [ ] Parallel agent execution for large test suites
