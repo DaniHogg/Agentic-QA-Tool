@@ -28,6 +28,8 @@ test plan in Markdown. The plan must include:
 
 {max_tests_guidance}
 
+**Important:** Do not include test cases that are functionally identical to previous cases. If two cases would test the same behavior, merge them or omit the duplicate. Prioritize unique coverage and avoid redundancy.
+
 You must adapt the plan to the requested strategy:
 - smoke: critical path only, high-signal checks, minimal set
 - sanity: basic feature health and key integrations

@@ -14,7 +14,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from agentic_qa.state import QAState
 from agentic_qa.llm import get_chat_model
 from agentic_qa.reuse_engine import score_reuse_candidates
-
+from rapidfuzz import fuzz
 
 _SYSTEM_PROMPT = """You are the QA Test Writer in an autonomous multi-agent testing system.
 You receive a test plan and produce complete, runnable pytest test code in Python.
@@ -72,7 +72,9 @@ def write(state: QAState) -> dict:
 
     run_id = uuid.uuid4().hex[:8]
     per_test_units = _build_per_test_files(code, timestamp=timestamp)
+    # Deduplicate plan cases before mapping
     case_map = _extract_plan_case_map(state.test_plan or "")
+    case_map = _deduplicate_plan_cases(case_map)
     approved_case_ids = list(case_map.keys())
     reuse_mode = os.getenv("REUSE_ENGINE_MODE", "reuse-high").strip().lower()
     scored_decisions = score_reuse_candidates(
