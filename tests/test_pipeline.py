@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
-import pytest
+import sqlite3
 
 from agentic_qa.state import QAState
 from agentic_qa.agents.executor import _parse_summary, execute
 from agentic_qa.agents.writer import _strip_markdown_fences, _build_per_test_files
 from agentic_qa.agents.reporter import _slugify
+from agentic_qa.context_store import (
+    finalize_memory_run,
+    get_memory_schema_version,
+    init_memory_store,
+    list_memory_runs,
+    load_plan_case_feedback,
+    load_run_feedback,
+    load_test_file_feedback,
+    save_run_feedback,
+    save_test_file_feedback,
+    save_plan_case_feedback,
+    start_memory_run,
+)
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -112,3 +124,103 @@ def test_slugify_max_length():
     long_url = "https://very-long-subdomain.example.com/api/v1/endpoint/with/many/parts"
     slug = _slugify(long_url)
     assert len(slug) <= 40
+
+
+def test_memory_store_run_and_feedback(tmp_path):
+    reports_dir = tmp_path / "reports"
+    db_path = init_memory_store(reports_dir)
+    assert db_path.exists()
+
+    run_id = start_memory_run(
+        reports_dir,
+        project_name="payments-api",
+        target="https://jsonplaceholder.typicode.com",
+        target_type="api",
+        strategy="smoke",
+        model_provider="anthropic",
+        model_name="claude-sonnet-4-6",
+    )
+
+    save_plan_case_feedback(
+        reports_dir,
+        run_id=run_id,
+        case_id="TC-001",
+        title="Get all posts",
+        body_markdown="- TC-001: Get all posts",
+        approved=True,
+    )
+
+    test_file = reports_dir / "projects" / "payments-api" / "tests" / "generated_test_tc001.py"
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.write_text("def test_tc001():\n    assert True\n", encoding="utf-8")
+
+    save_test_file_feedback(
+        reports_dir,
+        run_id=run_id,
+        file_path=str(test_file),
+        description="Get all posts",
+        approved=True,
+    )
+
+    save_run_feedback(
+        reports_dir,
+        run_id=run_id,
+        verdict="useful",
+        defect_quality="true_defect",
+        notes="Good output.",
+    )
+
+    finalize_memory_run(
+        reports_dir,
+        run_id=run_id,
+        status="passed",
+        tests_passed=1,
+        tests_failed=0,
+        tests_errors=0,
+        report_path=None,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        runs = conn.execute("SELECT status, tests_passed FROM runs WHERE id = ?", (run_id,)).fetchone()
+        assert runs is not None
+        assert runs[0] == "passed"
+        assert runs[1] == 1
+
+        case_row = conn.execute("SELECT approved FROM plan_cases WHERE run_id = ?", (run_id,)).fetchone()
+        assert case_row is not None
+        assert case_row[0] == 1
+
+        file_row = conn.execute("SELECT approved FROM test_files WHERE run_id = ?", (run_id,)).fetchone()
+        assert file_row is not None
+        assert file_row[0] == 1
+
+    runs = list_memory_runs(reports_dir, project_name="payments-api", limit=5)
+    assert runs
+    assert runs[0]["id"] == run_id
+
+    plan_rows = load_plan_case_feedback(reports_dir, run_id)
+    assert plan_rows
+    assert plan_rows[0]["approved"] == 1
+
+    test_rows = load_test_file_feedback(reports_dir, run_id)
+    assert test_rows
+    assert test_rows[0]["approved"] == 1
+
+    feedback_rows = load_run_feedback(reports_dir, run_id)
+    assert feedback_rows
+    assert feedback_rows[0]["verdict"] == "useful"
+
+
+def test_memory_schema_version_is_tracked(tmp_path):
+    reports_dir = tmp_path / "reports"
+    db_path = init_memory_store(reports_dir)
+
+    version = get_memory_schema_version(reports_dir)
+    assert version == 1
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'memory_schema_version'"
+        ).fetchone()
+        assert row is not None
+        assert int(row[0]) == 1

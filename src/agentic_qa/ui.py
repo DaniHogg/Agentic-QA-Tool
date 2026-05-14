@@ -18,9 +18,19 @@ from agentic_qa.context_store import (
     RunContext,
     append_run,
     compose_context_snippet,
+    finalize_memory_run,
+    init_memory_store,
+    list_memory_runs,
+    load_plan_case_feedback,
     load_project_runs,
     load_recent_runs,
+    load_run_feedback,
+    load_test_file_feedback,
     now_iso,
+    save_plan_case_feedback,
+    save_run_feedback,
+    save_test_file_feedback,
+    start_memory_run,
 )
 from agentic_qa.state import QAState
 from agentic_qa.agents.orchestrator import orchestrate
@@ -29,6 +39,7 @@ from agentic_qa.agents.writer import write
 from agentic_qa.agents.executor import execute
 from agentic_qa.agents.healer import heal
 from agentic_qa.agents.reporter import report
+from agentic_qa.cli import _write_html_report
 
 
 def launch() -> None:
@@ -145,16 +156,30 @@ def _preview_test_tabs(paths: list[str], key_prefix: str) -> None:
                 value=st.session_state.get(f"{key_prefix}_{path}", True),
                 key=f"{key_prefix}_{path}",
             )
+            st.text_input(
+                "Feedback reason (optional)",
+                value=st.session_state.get(f"{key_prefix}_reason_{path}", ""),
+                key=f"{key_prefix}_reason_{path}",
+                placeholder="Why approve/reject this test?",
+            )
 
 
 def _reset_workflow_state() -> None:
     """Clear in-progress plan/test approval workflow state."""
     for key in list(st.session_state.keys()):
-        if key.startswith("approve_plan_") or key.startswith("approve_test_"):
+        if (
+            key.startswith("approve_plan_")
+            or key.startswith("approve_test_")
+            or key.startswith("plan_reason_")
+            or key.startswith("plan_edit_")
+            or key.startswith("approve_test_reason_")
+        ):
             del st.session_state[key]
 
     st.session_state.workflow_stage = "idle"
     st.session_state.workflow_state = None
+    st.session_state.workflow_run_id = None
+    st.session_state.workflow_feedback_saved = False
     st.session_state.workflow_plan_header = ""
     st.session_state.workflow_plan_cases = []
     st.session_state.workflow_generated_files = []
@@ -167,6 +192,7 @@ def _ui_main() -> None:
 
     reports_dir = Path(os.getenv("REPORTS_DIR", "./reports")).resolve()
     os.environ["REPORTS_DIR"] = str(reports_dir)
+    init_memory_store(reports_dir)
     projects_base = reports_dir / "projects"
     existing_projects = sorted([p.name for p in projects_base.iterdir() if p.is_dir()]) if projects_base.exists() else []
 
@@ -180,6 +206,10 @@ def _ui_main() -> None:
         st.session_state.workflow_plan_cases = []
     if "workflow_generated_files" not in st.session_state:
         st.session_state.workflow_generated_files = []
+    if "workflow_run_id" not in st.session_state:
+        st.session_state.workflow_run_id = None
+    if "workflow_feedback_saved" not in st.session_state:
+        st.session_state.workflow_feedback_saved = False
     if "quiet_mode" not in st.session_state:
         st.session_state.quiet_mode = False
     if "quiet_show_plan" not in st.session_state:
@@ -342,6 +372,13 @@ def _ui_main() -> None:
     else:
         st.info("No previous runs recorded for this project yet.")
 
+    with st.expander("Project Memory Snapshot"):
+        memory_runs = list_memory_runs(reports_dir, project_name=project_name, limit=5)
+        if memory_runs:
+            st.dataframe(memory_runs, use_container_width=True, hide_index=True)
+        else:
+            st.caption("No memory runs stored yet for this project.")
+
     if recalled_context:
         merged_notes = (notes.strip() + "\n\n" + recalled_context).strip() if notes.strip() else recalled_context
     else:
@@ -382,6 +419,21 @@ def _ui_main() -> None:
         state = _run_node(state, orchestrate, "Orchestrator")
         state = _run_node(state, plan, "Planner")
 
+        active_model = model.strip() or (
+            os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+            if provider == "anthropic"
+            else os.getenv("OPENAI_MODEL", "gpt-4o")
+        )
+        run_id = start_memory_run(
+            reports_dir,
+            project_name=project_name,
+            target=target,
+            target_type=state.target_type or "api",
+            strategy=strategy,
+            model_provider=provider,
+            model_name=active_model,
+        )
+
         header, cases = _extract_plan_cases(state.test_plan or "")
         for case in cases:
             key = f"approve_plan_{case['id']}"
@@ -389,6 +441,8 @@ def _ui_main() -> None:
                 st.session_state[key] = True
 
         st.session_state.workflow_state = state.model_dump()
+        st.session_state.workflow_run_id = run_id
+        st.session_state.workflow_feedback_saved = False
         st.session_state.workflow_plan_header = header
         st.session_state.workflow_plan_cases = cases
         st.session_state.workflow_generated_files = []
@@ -408,6 +462,18 @@ def _ui_main() -> None:
                     value=st.session_state.get(f"approve_plan_{case['id']}", True),
                     key=f"approve_plan_{case['id']}",
                 )
+                st.text_input(
+                    "Feedback reason (optional)",
+                    value=st.session_state.get(f"plan_reason_{case['id']}", ""),
+                    key=f"plan_reason_{case['id']}",
+                    placeholder="Why approve/reject this case?",
+                )
+                st.text_area(
+                    "Edited case text (optional)",
+                    value=st.session_state.get(f"plan_edit_{case['id']}", ""),
+                    key=f"plan_edit_{case['id']}",
+                    height=140,
+                )
 
         plan_col1, plan_col2 = st.columns(2)
         with plan_col1:
@@ -421,10 +487,32 @@ def _ui_main() -> None:
                 if not approved:
                     st.warning("Select at least one approved test case to continue.")
                 else:
+                    run_id = st.session_state.workflow_run_id
+                    revised_cases = []
+                    if run_id:
+                        for case in cases:
+                            is_approved = case["id"] in approved
+                            reason = st.session_state.get(f"plan_reason_{case['id']}", "").strip()
+                            edited_body = st.session_state.get(f"plan_edit_{case['id']}", "").strip()
+                            selected_body = edited_body if edited_body else case["body"]
+                            save_plan_case_feedback(
+                                reports_dir,
+                                run_id=run_id,
+                                case_id=case["id"],
+                                title=case["title"],
+                                body_markdown=selected_body,
+                                approved=is_approved,
+                                reason=reason,
+                                edited_body_markdown=edited_body or None,
+                            )
+                            revised_cases.append({**case, "body": selected_body})
+                    else:
+                        revised_cases = cases
+
                     state = QAState(**st.session_state.workflow_state)
                     approved_plan = _build_approved_plan(
                         st.session_state.workflow_plan_header,
-                        cases,
+                        revised_cases,
                         approved,
                     )
                     state = _merge_state(state, {"test_plan": approved_plan})
@@ -461,6 +549,19 @@ def _ui_main() -> None:
                 if not approved_files:
                     st.warning("Approve at least one generated test file to run execution.")
                 else:
+                    run_id = st.session_state.workflow_run_id
+                    if run_id:
+                        for test_path in generated_files:
+                            reason = st.session_state.get(f"approve_test_reason_{test_path}", "").strip()
+                            save_test_file_feedback(
+                                reports_dir,
+                                run_id=run_id,
+                                file_path=test_path,
+                                description=_extract_test_description(Path(test_path)),
+                                approved=(test_path in approved_files),
+                                reason=reason,
+                            )
+
                     state = QAState(**st.session_state.workflow_state)
                     state = _merge_state(
                         state,
@@ -475,6 +576,10 @@ def _ui_main() -> None:
                         state = _run_node(state, heal, "Healer")
                         state = _run_node(state, execute, "Executor Retry")
                     state = _run_node(state, report, "Reporter")
+
+                    if report_format == "html" and state.report and state.report_path:
+                        html_report_path = _write_html_report(state)
+                        state = _merge_state(state, {"report_path": html_report_path})
 
                     status = "passed" if state.execution_success else "failed"
                     append_run(
@@ -499,12 +604,24 @@ def _ui_main() -> None:
                         ),
                     )
 
+                    if run_id:
+                        finalize_memory_run(
+                            reports_dir,
+                            run_id=run_id,
+                            status=status,
+                            tests_passed=state.tests_passed,
+                            tests_failed=state.tests_failed,
+                            tests_errors=state.tests_errors,
+                            report_path=state.report_path,
+                        )
+
                     st.session_state.workflow_state = state.model_dump()
                     st.session_state.workflow_stage = "completed"
                     st.rerun()
 
     if st.session_state.workflow_stage == "completed" and st.session_state.workflow_state:
         state = QAState(**st.session_state.workflow_state)
+        run_id = st.session_state.workflow_run_id
         st.markdown("### Outcome")
         if state.execution_success:
             st.success("Run completed successfully.")
@@ -550,6 +667,52 @@ def _ui_main() -> None:
                     st.code(report_text[:10000], language="html")
             except OSError:
                 st.warning("Report file path was reported but could not be read.")
+
+        st.markdown("### Post-Run Feedback")
+        feedback_col1, feedback_col2 = st.columns(2)
+        with feedback_col1:
+            verdict = st.selectbox(
+                "Overall usefulness",
+                ["useful", "not_useful"],
+                index=0,
+                key="postrun_verdict",
+            )
+        with feedback_col2:
+            defect_quality = st.selectbox(
+                "Failure quality",
+                ["true_defect", "test_issue", "mixed"],
+                index=0,
+                key="postrun_defect_quality",
+            )
+        feedback_notes = st.text_area(
+            "Post-run notes (optional)",
+            value="",
+            key="postrun_notes",
+            height=120,
+        )
+
+        if st.button("Save Post-Run Feedback"):
+            if run_id:
+                save_run_feedback(
+                    reports_dir,
+                    run_id=run_id,
+                    verdict=verdict,
+                    defect_quality=defect_quality,
+                    notes=feedback_notes.strip(),
+                )
+                st.session_state.workflow_feedback_saved = True
+                st.success("Post-run feedback saved to project memory.")
+            else:
+                st.warning("No active memory run ID found for this workflow.")
+
+        if run_id:
+            saved_plan = load_plan_case_feedback(reports_dir, run_id)
+            saved_tests = load_test_file_feedback(reports_dir, run_id)
+            saved_feedback = load_run_feedback(reports_dir, run_id)
+            st.caption(
+                "Saved memory records: "
+                f"{len(saved_plan)} plan decisions, {len(saved_tests)} test decisions, {len(saved_feedback)} run feedback item(s)."
+            )
 
 
 if __name__ == "__main__":

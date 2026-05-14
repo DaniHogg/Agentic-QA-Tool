@@ -480,11 +480,9 @@ def run(
 
 def _write_html_report(state) -> str:
     """Convert the Markdown report to a self-contained HTML file."""
-    import re
     from datetime import datetime, timezone
 
     md = state.report or ""
-    reports_dir = Path(os.getenv("REPORTS_DIR", "./reports"))
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
     # Minimal Markdown → HTML conversion (headings, bold, tables, code, lists)
